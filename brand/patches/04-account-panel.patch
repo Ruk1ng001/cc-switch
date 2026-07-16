@@ -33,7 +33,7 @@ index 645f1002..7c5c29f5 100644
  } from "lucide-react";
  import { getCurrentWindow } from "@tauri-apps/api/window";
  import type { Provider, VisibleApps } from "@/types";
-@@ -82,6 +83,14 @@ import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
+@@ -82,6 +83,15 @@ import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
  import { FirstRunNoticeDialog } from "@/components/FirstRunNoticeDialog";
  import { AgentsPanel } from "@/components/agents/AgentsPanel";
  import { UniversalProviderPanel } from "@/components/universal";
@@ -44,11 +44,12 @@ index 645f1002..7c5c29f5 100644
 +  DialogContent,
 +  DialogHeader,
 +  DialogTitle,
++  DialogDescription,
 +} from "@/components/ui/dialog";
  import { McpIcon } from "@/components/BrandIcons";
  import { Button } from "@/components/ui/button";
  import { SessionManagerPage } from "@/components/sessions/SessionManagerPage";
-@@ -174,6 +183,8 @@ function App() {
+@@ -174,6 +184,8 @@ function App() {
    const sharedFeatureApp: AppId =
      activeApp === "claude-desktop" ? "claude" : activeApp;
    const [currentView, setCurrentView] = useState<View>(getInitialView);
@@ -57,7 +58,7 @@ index 645f1002..7c5c29f5 100644
    const [skillsDiscoverySource, setSkillsDiscoverySource] =
      useState<SkillsPageSource>("repos");
    const [settingsDefaultTab, setSettingsDefaultTab] = useState("general");
-@@ -1215,6 +1226,16 @@ function App() {
+@@ -1215,6 +1227,16 @@ function App() {
                  >
                    <Settings className="w-4 h-4" />
                  </Button>
@@ -74,7 +75,7 @@ index 645f1002..7c5c29f5 100644
                  <UpdateBadge
                    onClick={() => {
                      setSettingsDefaultTab("about");
-@@ -1659,6 +1680,23 @@ function App() {
+@@ -1659,6 +1681,23 @@ function App() {
  
        <DeepLinkImportDialog />
        <FirstRunNoticeDialog />
