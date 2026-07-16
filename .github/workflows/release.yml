@@ -1,0 +1,457 @@
+name: release
+
+# c-switch 品牌层出包流水线（三平台：Windows x64 / Linux x64 / macOS universal）。
+#
+# 设计（与 auto-upgrade / open-code release 同构，适配 Tauri + pnpm + R2）：
+#   - submodule（upstream/）永远锁在干净上游 tag，定制全在 brand/patches/*.patch；
+#   - 出包 = 干净 checkout submodule 到 BASE_TAG → 按 NN 序 strict 重放补丁 →
+#     构建期注入 VITE_NEWAPI_* → pnpm tauri build（minisign 签名产 .sig）；
+#   - 产物 + 组装后的 latest.json 双写到 Cloudflare R2 dl.dokng.com/cc-switch/。
+#     补丁 01 已把 Tauri updater endpoint 指到 https://dl.dokng.com/cc-switch/latest.json，
+#     故 R2 是唯一自更新源（GitHub Release 仅作存档 / 手动下载回退）。
+#
+# 平台范围（本期）：Win x64 / Linux x64 / macOS universal。
+#   不含 Win ARM64 / Linux ARM64（ARM runner 有额外成本，本期不做）。
+#   不做 Apple 公证 / Windows 代码签名（需付费证书，本期不做）——用户首次安装会有
+#   系统安全警告，但 minisign 更新签名照做，自更新链路完整。
+#
+# 签名：TAURI_SIGNING_PRIVATE_KEY（minisign 私钥，与补丁 01 的 pubkey 配对）为必需 Secret。
+#   缺失则产物无 .sig、客户端验签失败、自更新废掉——故设为硬失败。
+#
+# 触发：push tag v*（auto-upgrade 每日升级后会打 vX.Y.Z-ccs.N 并推送，即触发本流水线）；
+#   workflow_dispatch 手动触发（需手填 tag，用于补发）。
+#
+# 需要的 Secret：
+#   TAURI_SIGNING_PRIVATE_KEY          minisign 私钥（两行原文 / base64 / 一行 base64 均可）
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD 私钥密码（本密钥对为空密码，可不设）
+#   VITE_NEWAPI_BASE_URL               内置渠道 new-api base（缺失则不注入内置渠道，功能不受影响）
+#   VITE_NEWAPI_API_KEY                内置渠道 new-api key
+#   VITE_NEWAPI_CHANNEL_NAME           内置渠道显示名（可选）
+#   R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_BUCKET
+#                                      R2 双写凭据（缺失则跳过 R2，仅发 GitHub Release）
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要出包的 tag（如 v3.17.0-ccs.1，须已存在）"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: 构建（${{ matrix.label }}）
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            label: windows-x86_64
+          - os: ubuntu-22.04
+            label: linux-x86_64
+          - os: macos-14
+            label: macos-universal
+
+    steps:
+      - name: Checkout（含 submodule，checkout 到触发 tag）
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: 干净 checkout submodule 到 BASE_TAG 并按 NN 序重放补丁
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_TAG="$(tr -d '[:space:]' < brand/BASE_TAG)"
+          echo "基线 tag：$BASE_TAG"
+          git -C upstream fetch --tags --quiet origin
+          git -C upstream checkout --quiet "$BASE_TAG"
+          git -C upstream reset --hard --quiet
+          git -C upstream clean -fdq
+          echo "按 NN 序重放补丁："
+          scripts/apply-patches.sh
+          echo "全部补丁 apply 成功。"
+
+      - name: 注入定制版本号到 tauri.conf.json
+        shell: bash
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          # 关键：app 内嵌版本必须等于 latest.json 的 version，updater 才能正确比对。
+          # tag 形如 v3.17.0-ccs.1 → 版本号 3.17.0-ccs.1（剥掉前导 v）。
+          # 若不改，app 内嵌版本仍是上游 3.17.0，而 latest.json 写 3.17.0-ccs.1（semver 预发布号
+          # 反而 < 3.17.0）→ updater 永远判定「无更新」→ 自更新彻底失效。
+          VERSION="${TAG#v}"
+          CONF="upstream/src-tauri/tauri.conf.json"
+          VERSION="$VERSION" python3 - "$CONF" <<'PY'
+          import json, os, sys
+          conf = sys.argv[1]
+          with open(conf, encoding="utf-8") as f:
+              data = json.load(f)
+          data["version"] = os.environ["VERSION"]
+          with open(conf, "w", encoding="utf-8") as f:
+              json.dump(data, f, ensure_ascii=False, indent=2)
+              f.write("\n")
+          print(f"tauri.conf.json version 已设为 {data['version']}")
+          PY
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: 安装 Linux 系统依赖
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config curl wget file patchelf libssl-dev \
+            libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            || sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
+          sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
+            || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
+
+      - name: 安装前端依赖
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            pnpm install --frozen-lockfile && break
+            if [ "$attempt" = 3 ]; then
+              echo "pnpm install 连续 3 次失败，放弃。" >&2
+              exit 1
+            fi
+            echo "pnpm install 第 $attempt 次失败，$((attempt * 15))s 后重试…" >&2
+            sleep $((attempt * 15))
+          done
+
+      - name: 准备 minisign 签名私钥
+        shell: bash
+        env:
+          RAW: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RAW:-}" ]; then
+            echo "❌ TAURI_SIGNING_PRIVATE_KEY 为空——无私钥则产物无 .sig、自更新验签失败。" >&2
+            echo "请在 Settings > Secrets and variables > Actions 配置该 Secret。" >&2
+            exit 1
+          fi
+          echo "::add-mask::$RAW"
+          KEY_PATH="$RUNNER_TEMP/tauri_signing.key"
+          # 情况 1：两行原文（首行以 "untrusted comment:" 开头）
+          if printf '%s' "$RAW" | head -n1 | grep -q '^untrusted comment:'; then
+            printf '%s\n' "$RAW" > "$KEY_PATH"
+          # 情况 2：整体 base64 包裹（解包后两行）
+          elif DECODED=$(printf '%s' "$RAW" | base64 --decode 2>/dev/null) \
+               && printf '%s' "$DECODED" | head -n1 | grep -q '^untrusted comment:'; then
+            printf '%s\n' "$DECODED" > "$KEY_PATH"
+          # 情况 3：一行纯 base64 → 补首行注释成两行
+          elif printf '%s' "$RAW" | grep -Eq '^[A-Za-z0-9+/=]+$'; then
+            ONE=$(printf '%s' "$RAW" | tr -d '\r\n')
+            printf '%s\n%s\n' "untrusted comment: tauri signing key" "$ONE" > "$KEY_PATH"
+          else
+            echo "❌ TAURI_SIGNING_PRIVATE_KEY 格式无法识别。" >&2
+            exit 1
+          fi
+          # Tauri 接受完整私钥文本（base64 单行）注入环境变量。
+          KEY_B64=$(base64 < "$KEY_PATH" | tr -d '\r\n')
+          echo "::add-mask::$KEY_B64"
+          echo "TAURI_SIGNING_PRIVATE_KEY=$KEY_B64" >> "$GITHUB_ENV"
+          if [ -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+          fi
+          rm -f "$KEY_PATH"
+          echo "✅ minisign 私钥就绪"
+
+      - name: 构建 Tauri App（macOS universal）
+        if: runner.os == 'macOS'
+        working-directory: upstream
+        timeout-minutes: 60
+        env:
+          VITE_NEWAPI_BASE_URL: ${{ secrets.VITE_NEWAPI_BASE_URL }}
+          VITE_NEWAPI_API_KEY: ${{ secrets.VITE_NEWAPI_API_KEY }}
+          VITE_NEWAPI_CHANNEL_NAME: ${{ secrets.VITE_NEWAPI_CHANNEL_NAME }}
+        run: pnpm tauri build --target universal-apple-darwin
+
+      - name: 构建 Tauri App（Windows x64）
+        if: runner.os == 'Windows'
+        working-directory: upstream
+        env:
+          VITE_NEWAPI_BASE_URL: ${{ secrets.VITE_NEWAPI_BASE_URL }}
+          VITE_NEWAPI_API_KEY: ${{ secrets.VITE_NEWAPI_API_KEY }}
+          VITE_NEWAPI_CHANNEL_NAME: ${{ secrets.VITE_NEWAPI_CHANNEL_NAME }}
+        run: pnpm tauri build
+
+      - name: 构建 Tauri App（Linux x64）
+        if: runner.os == 'Linux'
+        working-directory: upstream
+        env:
+          VITE_NEWAPI_BASE_URL: ${{ secrets.VITE_NEWAPI_BASE_URL }}
+          VITE_NEWAPI_API_KEY: ${{ secrets.VITE_NEWAPI_API_KEY }}
+          VITE_NEWAPI_CHANNEL_NAME: ${{ secrets.VITE_NEWAPI_CHANNEL_NAME }}
+        run: pnpm tauri build --bundles appimage,deb,rpm
+
+      - name: 收集 macOS 产物
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p release-assets
+          VERSION="${{ github.event.inputs.tag || github.ref_name }}"
+          TAR_GZ=""; DMG=""
+          for path in \
+            "upstream/src-tauri/target/universal-apple-darwin/release/bundle/macos" \
+            "upstream/src-tauri/target/release/bundle/macos"; do
+            [ -d "$path" ] && [ -z "$TAR_GZ" ] && TAR_GZ=$(find "$path" -maxdepth 1 -name "*.tar.gz" -type f | head -1 || true) || true
+          done
+          for path in \
+            "upstream/src-tauri/target/universal-apple-darwin/release/bundle/dmg" \
+            "upstream/src-tauri/target/release/bundle/dmg"; do
+            [ -d "$path" ] && [ -z "$DMG" ] && DMG=$(find "$path" -maxdepth 1 -name "*.dmg" -type f | head -1 || true) || true
+          done
+          if [ -z "$TAR_GZ" ]; then
+            echo "❌ 未找到 macOS updater 产物 .tar.gz" >&2
+            exit 1
+          fi
+          cp "$TAR_GZ" "release-assets/CC-Switch-${VERSION}-macOS.tar.gz"
+          [ -f "$TAR_GZ.sig" ] && cp "$TAR_GZ.sig" "release-assets/CC-Switch-${VERSION}-macOS.tar.gz.sig" \
+            || { echo "❌ macOS .tar.gz.sig 缺失（签名失败？）" >&2; exit 1; }
+          [ -n "$DMG" ] && cp "$DMG" "release-assets/CC-Switch-${VERSION}-macOS.dmg" || echo "无 DMG（可选）"
+
+      - name: 收集 Windows 产物
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          $VERSION = if ($env:INPUT_TAG) { $env:INPUT_TAG } else { $env:GITHUB_REF_NAME }
+          $msi = Get-ChildItem -Path 'upstream/src-tauri/target/release/bundle/msi' -Recurse -Include *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -eq $msi) {
+            throw 'No Windows MSI installer found'
+          }
+          $dest = "CC-Switch-$VERSION-Windows.msi"
+          Copy-Item $msi.FullName (Join-Path release-assets $dest)
+          $sigPath = "$($msi.FullName).sig"
+          if (Test-Path $sigPath) {
+            Copy-Item $sigPath (Join-Path release-assets ("$dest.sig"))
+          } else {
+            throw "Signature not found for $($msi.Name) (签名失败？)"
+          }
+          # 绿色版（portable）：仅 exe 打 zip，不参与 Updater
+          $exePath = @(
+            'upstream/src-tauri/target/release/cc-switch.exe',
+            'upstream/src-tauri/target/x86_64-pc-windows-msvc/release/cc-switch.exe'
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if ($null -ne $exePath) {
+            $portableDir = 'release-assets/CC-Switch-Portable'
+            New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
+            Copy-Item $exePath $portableDir
+            '# CC Switch portable build marker', 'portable=true' | Set-Content -Path (Join-Path $portableDir 'portable.ini') -Encoding UTF8
+            Compress-Archive -Path "$portableDir/*" -DestinationPath "release-assets/CC-Switch-$VERSION-Windows-Portable.zip" -Force
+            Remove-Item -Recurse -Force $portableDir
+          }
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+
+      - name: 收集 Linux 产物
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p release-assets
+          VERSION="${{ github.event.inputs.tag || github.ref_name }}"
+          APPIMAGE=$(find upstream/src-tauri/target/release/bundle -name "*.AppImage" | head -1 || true)
+          if [ -z "$APPIMAGE" ]; then
+            echo "❌ 未找到 AppImage（Linux updater 产物）" >&2
+            exit 1
+          fi
+          cp "$APPIMAGE" "release-assets/CC-Switch-${VERSION}-Linux-x86_64.AppImage"
+          [ -f "$APPIMAGE.sig" ] && cp "$APPIMAGE.sig" "release-assets/CC-Switch-${VERSION}-Linux-x86_64.AppImage.sig" \
+            || { echo "❌ AppImage.sig 缺失（签名失败？）" >&2; exit 1; }
+          DEB=$(find upstream/src-tauri/target/release/bundle -name "*.deb" | head -1 || true)
+          [ -n "$DEB" ] && cp "$DEB" "release-assets/CC-Switch-${VERSION}-Linux-x86_64.deb" || echo "无 .deb（可选）"
+          RPM=$(find upstream/src-tauri/target/release/bundle -name "*.rpm" | head -1 || true)
+          [ -n "$RPM" ] && cp "$RPM" "release-assets/CC-Switch-${VERSION}-Linux-x86_64.rpm" || echo "无 .rpm（可选）"
+
+      - name: 上传产物到 workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ matrix.label }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish:
+    name: 组装 latest.json + 发布 + R2 双写
+    runs-on: ubuntu-22.04
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - name: 下载全部构建产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-assets-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: 列出产物
+        shell: bash
+        run: ls -la release-assets
+
+      - name: 组装 latest.json
+        shell: bash
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          PUB_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          base_url="https://dl.dokng.com/cc-switch"
+          mac_url=""; mac_sig=""
+          win_url=""; win_sig=""
+          linux_url=""; linux_sig=""
+          shopt -s nullglob
+          for sig in release-assets/*.sig; do
+            fname=$(basename "${sig%.sig}")
+            url="$base_url/$fname"
+            sig_content=$(cat "$sig")
+            case "$fname" in
+              *.tar.gz)             mac_url="$url"; mac_sig="$sig_content";;
+              *-Windows.msi)        win_url="$url"; win_sig="$sig_content";;
+              *-Linux-x86_64.AppImage) linux_url="$url"; linux_sig="$sig_content";;
+            esac
+          done
+          tmp_json=$(mktemp)
+          {
+            echo '{'
+            echo "  \"version\": \"$VERSION\","
+            echo "  \"notes\": \"Release $TAG\","
+            echo "  \"pub_date\": \"$PUB_DATE\","
+            echo '  "platforms": {'
+            first=1
+            if [ -n "$mac_url" ] && [ -n "$mac_sig" ]; then
+              for key in darwin-aarch64 darwin-x86_64; do
+                [ $first -eq 0 ] && echo ','
+                printf '    "%s": {"signature": "%s", "url": "%s"}' "$key" "$mac_sig" "$mac_url"
+                first=0
+              done
+            fi
+            if [ -n "$win_url" ] && [ -n "$win_sig" ]; then
+              [ $first -eq 0 ] && echo ','
+              printf '    "windows-x86_64": {"signature": "%s", "url": "%s"}' "$win_sig" "$win_url"
+              first=0
+            fi
+            if [ -n "$linux_url" ] && [ -n "$linux_sig" ]; then
+              [ $first -eq 0 ] && echo ','
+              printf '    "linux-x86_64": {"signature": "%s", "url": "%s"}' "$linux_sig" "$linux_url"
+              first=0
+            fi
+            echo ''
+            echo '  }'
+            echo '}'
+          } > "$tmp_json"
+          echo "生成的 latest.json："; cat "$tmp_json"
+          python3 -c "import json,sys; json.load(open('$tmp_json'))" && echo "✅ latest.json JSON 合法"
+          mv "$tmp_json" release-assets/latest.json
+
+      - name: 发布 GitHub Release（存档 / 手动下载回退）
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: CC Switch ${{ github.event.inputs.tag || github.ref_name }}
+          prerelease: true
+          body: |
+            ## CC Switch ${{ github.event.inputs.tag || github.ref_name }}
+
+            自更新源为 R2（dl.dokng.com/cc-switch）。此处附件仅作存档 / 手动下载。
+
+            - **macOS**: `.dmg`（首次安装需在系统设置放行，未做 Apple 公证）
+            - **Windows (x64)**: `.msi`（安装版）/ `-Portable.zip`（绿色版）；未做代码签名，SmartScreen 可能提示
+            - **Linux (x64)**: `.AppImage` / `.deb` / `.rpm`
+
+            > `.tar.gz` / `.sig` 为 Tauri updater 自动更新专用，无需手动下载。
+          files: release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # R2 双写：产物 + latest.json 推到 dl.dokng.com/cc-switch/（补丁 01 的 updater 主源）。
+      # 未配置 R2 Secret 时整步跳过（渐进启用），仅发 GitHub Release。
+      # 用 aws s3 CLI（ubuntu runner 自带，R2 兼容 S3 API）。
+      - name: 双写产物到 Cloudflare R2（cc-switch/ 目录）
+        if: env.R2_ACCESS_KEY_ID != ''
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          set -euo pipefail
+          for v in "$R2_ACCOUNT_ID" "$R2_ACCESS_KEY_ID" "$R2_SECRET_ACCESS_KEY" "$R2_BUCKET"; do
+            [ -n "$v" ] && echo "::add-mask::$v" || true
+          done
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          echo "待上传到 R2 cc-switch/ 的文件："; ls -la release-assets
+          # --checksum-algorithm CRC32：规避 R2 对 S3 默认分块校验的兼容问题。
+          aws s3 cp release-assets/ "s3://${R2_BUCKET}/cc-switch/" \
+            --recursive \
+            --endpoint-url "$endpoint" \
+            --checksum-algorithm CRC32
+          echo "R2 双写完成：s3://${R2_BUCKET}/cc-switch/"
+
+          # 保留最近 3 个版本：产物文件名含版本 token（vX.Y.Z-ccs.N）；latest.json 无版本号永远保留。
+          KEEP_VERSIONS=3
+          mapfile -t all_keys < <(
+            aws s3 ls "s3://${R2_BUCKET}/cc-switch/" --endpoint-url "$endpoint" \
+              | awk '{print $4}' | grep -v '^$' || true
+          )
+          if [ "${#all_keys[@]}" -gt 0 ]; then
+            versions="$(printf '%s\n' "${all_keys[@]}" \
+              | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+-ccs\.[0-9]+' | sort -V -u || true)"
+            total="$(printf '%s\n' "$versions" | grep -c . || true)"
+            keep="$(printf '%s\n' "$versions" | tail -n "$KEEP_VERSIONS")"
+            echo "R2 现有版本共 ${total} 个，保留最新 ${KEEP_VERSIONS} 个："
+            printf '  keep: %s\n' $keep
+            if [ "${total:-0}" -gt "$KEEP_VERSIONS" ]; then
+              for key in "${all_keys[@]}"; do
+                v="$(printf '%s' "$key" | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+-ccs\.[0-9]+' | head -1 || true)"
+                [ -n "$v" ] || continue
+                if ! printf '%s\n' "$keep" | grep -qxF "$v"; then
+                  echo "  清理旧版本对象：$key"
+                  aws s3 rm "s3://${R2_BUCKET}/cc-switch/${key}" --endpoint-url "$endpoint" || true
+                fi
+              done
+            else
+              echo "版本数未超过保留上限，无需清理。"
+            fi
+          fi
+          echo "R2 版本清理完成。"
