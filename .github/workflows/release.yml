@@ -422,11 +422,23 @@ jobs:
           endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
           echo "待上传到 R2 cc-switch/ 的文件："; ls -la release-assets
           # --checksum-algorithm CRC32：规避 R2 对 S3 默认分块校验的兼容问题。
+          #
+          # 缓存分级（关键）：安装包/.sig 文件名带版本号（URL 每版唯一）→ 长缓存 immutable，
+          # CDN 尽量命中；latest.json 是固定 URL、每版都要覆盖 → 必须禁缓存，否则 Cloudflare
+          # CDN 会把旧 latest.json 缓存住，客户端拉不到新版本、自更新延迟数小时。
+          # 先整目录长缓存（含 latest.json，随后被覆盖），再单独覆盖 latest.json 为禁缓存。
           aws s3 cp release-assets/ "s3://${R2_BUCKET}/cc-switch/" \
             --recursive \
+            --exclude "latest.json" \
             --endpoint-url "$endpoint" \
-            --checksum-algorithm CRC32
-          echo "R2 双写完成：s3://${R2_BUCKET}/cc-switch/"
+            --checksum-algorithm CRC32 \
+            --cache-control "public,max-age=31536000,immutable"
+          aws s3 cp release-assets/latest.json "s3://${R2_BUCKET}/cc-switch/latest.json" \
+            --endpoint-url "$endpoint" \
+            --checksum-algorithm CRC32 \
+            --content-type "application/json" \
+            --cache-control "no-cache,max-age=0,must-revalidate"
+          echo "R2 双写完成：s3://${R2_BUCKET}/cc-switch/（latest.json 禁缓存，产物 immutable）"
 
           # 保留最近 3 个版本：产物文件名含版本 token（vX.Y.Z-ccs.N）；latest.json 无版本号永远保留。
           KEEP_VERSIONS=3
