@@ -5,7 +5,7 @@ name: release
 # 设计（与 auto-upgrade / open-code release 同构，适配 Tauri + pnpm + R2）：
 #   - submodule（upstream/）永远锁在干净上游 tag，定制全在 brand/patches/*.patch；
 #   - 出包 = 干净 checkout submodule 到 BASE_TAG → 按 NN 序 strict 重放补丁 →
-#     构建期注入 VITE_NEWAPI_* → pnpm tauri build（minisign 签名产 .sig）；
+#     pnpm tauri build（minisign 签名产 .sig）；
 #   - 产物 + 组装后的 latest.json 双写到 Cloudflare R2 dl.dokng.com/cc-switch/。
 #     补丁 01 已把 Tauri updater endpoint 指到 https://dl.dokng.com/cc-switch/latest.json，
 #     故 R2 是唯一自更新源（GitHub Release 仅作存档 / 手动下载回退）。
@@ -24,9 +24,6 @@ name: release
 # 需要的 Secret：
 #   TAURI_SIGNING_PRIVATE_KEY          minisign 私钥（两行原文 / base64 / 一行 base64 均可）
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD 私钥密码（本密钥对为空密码，可不设）
-#   VITE_NEWAPI_BASE_URL               内置渠道 new-api base（缺失则不注入内置渠道，功能不受影响）
-#   VITE_NEWAPI_API_KEY                内置渠道 new-api key
-#   VITE_NEWAPI_CHANNEL_NAME           内置渠道显示名（可选）
 #   R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_BUCKET
 #                                      R2 双写凭据（缺失则跳过 R2，仅发 GitHub Release）
 
@@ -194,28 +191,16 @@ jobs:
         if: runner.os == 'macOS'
         working-directory: upstream
         timeout-minutes: 60
-        env:
-          VITE_NEWAPI_BASE_URL: ${{ secrets.VITE_NEWAPI_BASE_URL }}
-          VITE_NEWAPI_API_KEY: ${{ secrets.VITE_NEWAPI_API_KEY }}
-          VITE_NEWAPI_CHANNEL_NAME: ${{ secrets.VITE_NEWAPI_CHANNEL_NAME }}
         run: pnpm tauri build --target universal-apple-darwin
 
       - name: 构建 Tauri App（Windows x64）
         if: runner.os == 'Windows'
         working-directory: upstream
-        env:
-          VITE_NEWAPI_BASE_URL: ${{ secrets.VITE_NEWAPI_BASE_URL }}
-          VITE_NEWAPI_API_KEY: ${{ secrets.VITE_NEWAPI_API_KEY }}
-          VITE_NEWAPI_CHANNEL_NAME: ${{ secrets.VITE_NEWAPI_CHANNEL_NAME }}
         run: pnpm tauri build
 
       - name: 构建 Tauri App（Linux x64）
         if: runner.os == 'Linux'
         working-directory: upstream
-        env:
-          VITE_NEWAPI_BASE_URL: ${{ secrets.VITE_NEWAPI_BASE_URL }}
-          VITE_NEWAPI_API_KEY: ${{ secrets.VITE_NEWAPI_API_KEY }}
-          VITE_NEWAPI_CHANNEL_NAME: ${{ secrets.VITE_NEWAPI_CHANNEL_NAME }}
         run: pnpm tauri build --bundles appimage,deb,rpm
 
       - name: 收集 macOS 产物
