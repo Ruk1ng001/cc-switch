@@ -1,0 +1,49 @@
+# 01-self-update-endpoint —— 把 Tauri 自更新指向自建 R2 + 换成自有验签公钥
+#
+# 职责：改 src-tauri/tauri.conf.json 里 plugins.updater 的两个字段：
+#       · endpoints —— 从上游 farion1231/cc-switch 的 GitHub release，改指向自建 R2；
+#       · pubkey    —— 从上游验签公钥，换成本项目自有的 minisign 公钥。
+#
+# 为什么必须改：
+#   Tauri updater（tauri-plugin-updater）只认 tauri.conf.json 里写死的 endpoints
+#   + pubkey。不改 endpoints，装出来的定制包会去查上游 release 的 latest.json，永远
+#   拉到官方版本、且我方产物根本不在那里 → 自更新指错源。不改 pubkey，客户端会用
+#   上游公钥验签我方产物 → 因私钥不配对，更新包一律被拒装。前端 src/lib/updater.ts
+#   只是 @tauri-apps/plugin-updater 的薄封装、无硬编码源，无需改动。
+#
+# R2 路径约定（与 open-code 那套共用同一桶 dl.dokng.com）：
+#   - open-code（Electron）发布在   dl.dokng.com/latest/        （electron 的 latest*.yml）
+#   - cc-switch（Tauri）发布在       dl.dokng.com/cc-switch/     （tauri 的 latest.json）
+#   两者格式不同、路径隔离，共用桶不互相覆盖。出包 workflow 接入后，把编译产物 +
+#   签名后的 latest.json 上传到 R2 的 cc-switch/ 目录即可。
+#
+# 签名密钥（pubkey 已是本项目自有公钥，与之配对的私钥不在本仓库）：
+#   - 本 pubkey 由 `tauri signer generate` 生成（minisign），与之配对的私钥必须由
+#     出包 CI 持有才能签名产物：
+#       · 私钥全文 → CI Secret TAURI_SIGNING_PRIVATE_KEY
+#       · 私钥密码 → CI Secret TAURI_SIGNING_PRIVATE_KEY_PASSWORD（本密钥对为空密码，
+#         该 Secret 可留空 / 不设）
+#   - ⚠️ 私钥务必妥善保管：私钥或密码一旦丢失，将无法再签名更新包，已装用户的自更新
+#     会永久失效（只能引导用户手动重装新密钥的版本）。
+#   - 换密钥对时：同步替换本补丁的 pubkey 与 CI Secret 里的私钥，两者必须始终配对。
+#
+# 依赖：独立文件（tauri.conf.json），不与其它补丁共享。updater 块与文件顶部的
+#       version 字段隔开数十行、git apply 分 hunk 处理，上游 bump 版本号不会与本补丁冲突。
+# 应用（在 upstream/ 内，基线为 brand/BASE_SHA）：
+#   git -C upstream apply brand/patches/01-self-update-endpoint.patch
+diff --git a/src-tauri/tauri.conf.json b/src-tauri/tauri.conf.json
+index 5f7a87a0..37e766a5 100644
+--- a/src-tauri/tauri.conf.json
++++ b/src-tauri/tauri.conf.json
+@@ -60,9 +60,9 @@
+       }
+     },
+     "updater": {
+-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM4MDI4QzlBNTczOTI4RTMKUldUaktEbFhtb3dDeUM5US9kT0FmdGR5Ti9vQzcwa2dTMlpibDVDUmQ2M0VGTzVOWnd0SGpFVlEK",
++      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgwMzZGMzVENTkzN0FDRDgKUldUWXJEZFpYZk0yZ0hSalNRd2FpeldXdkU1Q3VNTUlCNlF4cXI0T1ZCN1EwTytsTFcxalhWSHEK",
+       "endpoints": [
+-        "https://github.com/farion1231/cc-switch/releases/latest/download/latest.json"
++        "https://dl.dokng.com/cc-switch/latest.json"
+       ]
+     }
+   }

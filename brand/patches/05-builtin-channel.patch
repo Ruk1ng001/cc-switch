@@ -1,0 +1,135 @@
+# 05-builtin-channel — 内置 new-api 渠道开箱注入（构建期 env）
+#
+# 职责：正常启动路径自动注入一条预置 newapi 渠道（UniversalProvider），让用户装完即用——
+#       等价 open-code brand/opencode.template.json 的「内置渠道」，同为构建期 env 注入哲学
+#       （密钥绝不入仓，仅经 CI Secret / .env 在打包期注入 import.meta.env）。
+#
+# 覆盖文件：
+#   - src/lib/account/seedBuiltinChannel.ts（新增）：读 VITE_NEWAPI_* 构建期变量，若已配置且
+#     本地无同源渠道则用 NewAPI 预设 upsert + sync 一条渠道。只 seed 一次（localStorage 标志，
+#     用户删除后不复活）+ 幂等（同 baseUrl 已存在则跳过）。缺省（未配 env）时静默 no-op。
+#   - src/vite-env.d.ts（改）：声明 ImportMetaEnv 的 VITE_NEWAPI_BASE_URL / VITE_NEWAPI_API_KEY
+#     / VITE_NEWAPI_CHANNEL_NAME（可选）类型。
+#   - src/main.tsx（改）：bootstrap 正常渲染路径 fire-and-forget 调用 seedBuiltinChannel()
+#     （错误/升级分支已提前 return，不触发）。失败不阻塞渲染（模块内吞异常并打日志）。
+#
+# 与 open-code 对齐：open-code 走 {env:NEWAPI_BASE_URL/API_KEY/MODEL} 模板；这里走 Vite 的
+#   import.meta.env.VITE_NEWAPI_*。构建期值配置见 brand/channel.env.example（不入仓的真实值经
+#   CI Secret 注入，本地开发可放 upstream/.env.local——已被 .gitignore 覆盖）。
+#
+# 依赖：依赖 04 补丁的 importKey.ts（bindAccount / normalizeBaseUrl 复用其组装逻辑经内部实现）
+#       与 NewAPI 预设（universalProviderPresets）。纯前端，零 Rust 改动。
+# 应用（在 upstream/ 内，基线为 brand/BASE_SHA）：
+#   git -C upstream apply brand/patches/05-builtin-channel.patch
+diff --git a/src/lib/account/seedBuiltinChannel.ts b/src/lib/account/seedBuiltinChannel.ts
+new file mode 100644
+index 00000000..5364449e
+--- /dev/null
++++ b/src/lib/account/seedBuiltinChannel.ts
+@@ -0,0 +1,62 @@
++// [ccs] 内置渠道注入。
++//
++// 与 open-code 的内置渠道对齐：那边打包期用 {env:NEWAPI_*} 把渠道凭据注入 opencode.template.json；
++// 这里等价做法是构建期经 Vite env（VITE_NEWAPI_*）注入，首次启动 seed 一条 providerType:"newapi"
++// 的 UniversalProvider 并铺开到各 CLI（走 04 的 bindAccount → upsert + sync）。
++//
++// 安全：密钥绝不入仓（本文件只读 import.meta.env，值由 CI 在构建期注入最终包）。占位/本地开发
++//       （未配置或 example.com）时直接 no-op。
++//
++// 幂等 + 只注入一次：localStorage 标志确保用户显式删除后不复活；同 baseUrl 已存在则只置标志不重复建。
++
++import { universalProvidersApi } from "@/lib/api";
++import { bindAccount } from "@/components/account/importKey";
++
++// [ccs] 标志键：已 seed 过内置渠道。置位后即使用户删掉渠道也不再自动注入。
++const SEED_FLAG = "ccs.builtinChannelSeeded";
++
++function readEnv(key: string): string {
++  const v = (import.meta.env as Record<string, string | undefined>)[key];
++  return typeof v === "string" ? v.trim() : "";
++}
++
++function stripTrailingSlash(u: string): string {
++  return u.replace(/\/+$/, "");
++}
++
++// [ccs] 首次启动注入内置渠道。失败不抛（不阻塞启动），未置标志时下次启动重试。
++export async function seedBuiltinChannel(): Promise<void> {
++  const baseUrl = readEnv("VITE_NEWAPI_BASE_URL");
++  const apiKey = readEnv("VITE_NEWAPI_API_KEY");
++  const name = readEnv("VITE_NEWAPI_CHANNEL_NAME") || "内置渠道";
++
++  // 未配置构建期凭据（占位 / 本地开发）→ 不注入。
++  if (!baseUrl || !apiKey) return;
++  // 占位样例值防呆：example.com 视为未配置。
++  if (baseUrl.includes("example.com")) return;
++
++  // 只 seed 一次：用户显式删除后不应复活。
++  try {
++    if (localStorage.getItem(SEED_FLAG)) return;
++  } catch {
++    // localStorage 不可用时保守跳过（避免重复注入）。
++    return;
++  }
++
++  try {
++    // 幂等：已存在同 baseUrl 的 newapi 渠道则只置标志，不重复建。
++    const existing = await universalProvidersApi.getAll();
++    const dup = Object.values(existing).some(
++      (p) =>
++        p.providerType === "newapi" &&
++        stripTrailingSlash(p.baseUrl) === stripTrailingSlash(baseUrl),
++    );
++    if (!dup) {
++      await bindAccount({ baseUrl, apiKey, name });
++    }
++    localStorage.setItem(SEED_FLAG, String(Date.now()));
++  } catch (e) {
++    // 注入失败不阻塞启动；未置标志，下次启动重试。
++    console.error("[ccs] 内置渠道注入失败", e);
++  }
++}
+diff --git a/src/main.tsx b/src/main.tsx
+index 923f0ab4..acc49437 100644
+--- a/src/main.tsx
++++ b/src/main.tsx
+@@ -9,6 +9,8 @@ import i18n from "./i18n";
+ import { QueryClientProvider } from "@tanstack/react-query";
+ import { ThemeProvider } from "@/components/theme-provider";
+ import { queryClient } from "@/lib/query";
++// [ccs] 内置渠道 seed（构建期 env 注入，仅首次幂等写入）。
++import { seedBuiltinChannel } from "@/lib/account/seedBuiltinChannel";
+ import { Toaster } from "@/components/ui/sonner";
+ import { listen } from "@tauri-apps/api/event";
+ import { invoke } from "@tauri-apps/api/core";
+@@ -101,6 +103,9 @@ async function bootstrap() {
+     console.error("拉取初始化错误失败", e);
+   }
+ 
++  // [ccs] 内置渠道 seed：fire-and-forget，不阻塞首屏渲染；内部自带首次标志 + 幂等去重。
++  void seedBuiltinChannel();
++
+   ReactDOM.createRoot(document.getElementById("root")!).render(
+     <React.StrictMode>
+       <QueryClientProvider client={queryClient}>
+diff --git a/src/vite-env.d.ts b/src/vite-env.d.ts
+index 65d49023..7c333c6b 100644
+--- a/src/vite-env.d.ts
++++ b/src/vite-env.d.ts
+@@ -1,3 +1,16 @@
+ /// <reference types="vite/client" />
+ 
++// [ccs] 内置渠道的构建期注入变量。密钥/私有 baseURL 绝不写入仓库——
++// 仅由 CI 在打包时经这些 VITE_* env 注入（对齐 open-code 的 {env:NEWAPI_*} 模式）。
++// 三者留空时不 seed 任何内置渠道（见 lib/account/seedBuiltinChannel.ts）。
++interface ImportMetaEnv {
++  readonly VITE_NEWAPI_BASE_URL?: string;
++  readonly VITE_NEWAPI_API_KEY?: string;
++  readonly VITE_NEWAPI_CHANNEL_NAME?: string;
++}
++
++interface ImportMeta {
++  readonly env: ImportMetaEnv;
++}
++
+ export {};

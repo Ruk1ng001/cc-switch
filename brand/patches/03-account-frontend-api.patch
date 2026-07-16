@@ -1,0 +1,194 @@
+# 03-account-frontend-api — new-api 账户体系前端接口封装 + 纯展示函数
+#
+# 职责：纯新增两个前端文件，供后续账户面板 UI 补丁使用。零上游文件改动（不碰 barrel
+#       index.ts 等高频文件；组件直接按路径 import）。
+#
+# 覆盖文件（均为新增）：
+#   - src/lib/api/account.ts：AccountProfile 类型（对齐 Rust AccountProfile，camelCase）
+#     + accountApi.getProfile / getModels（invoke 封装 02 补丁的 command）。
+#   - src/lib/account/format.ts：从 open-code cx-account-api.ts 1:1 移植的纯展示函数
+#     （formatCurrency / formatTokenCount / maskKey / usedPercent / keyUsedPercent /
+#      formatExpiry / keyStatusLabel / avatarInitial），QUOTA_PER_UNIT=500000。
+#
+# 接口方式与 open-code 完全一致：前端只调后端 command（get_account_profile/get_account_models），
+#   不直接 fetch（Tauri WebView CORS 约束，请求走 Rust http_client）。额度换算在此层（渲染层）
+#   做，与 open-code 同构（数据层透传原值）。
+#
+# 依赖：依赖 02 补丁的后端命令（get_account_profile / get_account_models）已注册。
+#       纯新增文件，与其它补丁不共享文件。
+# 应用（在 upstream/ 内，基线为 brand/BASE_SHA）：
+#   git -C upstream apply brand/patches/03-account-frontend-api.patch
+diff --git a/src/lib/account/format.ts b/src/lib/account/format.ts
+new file mode 100644
+index 00000000..2e0838fb
+--- /dev/null
++++ b/src/lib/account/format.ts
+@@ -0,0 +1,99 @@
++// [ccs] 账户面板展示用纯函数。从 open-code 的 cx-account-api.ts 1:1 移植（保持行为完全一致），
++// 与 UI / 网络解耦，可单测。额度→美元换算的 QUOTA_PER_UNIT 也在此（对齐 open-code：换算在渲染层）。
++
++// new-api 默认 QuotaPerUnit：500000 额度 = 1 美元（common.QuotaPerUnit 默认值）。目标站点若改了
++// 该值，展示金额会有偏差——额度原值同时可展示以便对照。
++const QUOTA_PER_UNIT = 500000;
++
++// 额度 → 美元金额（两位小数）。
++export function formatCurrency(quotaUnits: number): string {
++  return "$" + (quotaUnits / QUOTA_PER_UNIT).toFixed(2);
++}
++
++// 模型实际消耗 token 数的人类可读格式。注意：这里的 token 指 prompt_tokens +
++// completion_tokens，不是 new-api 的 API Token / Key 记录。
++export function formatTokenCount(value: number | null): string {
++  if (value === null || !Number.isFinite(value)) return "—";
++  const count = Math.max(0, value);
++  const units = [
++    { value: 1_000_000_000, suffix: "B" },
++    { value: 1_000_000, suffix: "M" },
++    { value: 1_000, suffix: "K" },
++  ];
++  const unit = units.find((item) => count >= item.value);
++  if (!unit) return Math.round(count).toLocaleString("zh-CN");
++  const scaled = count / unit.value;
++  const digits = scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
++  return `${Number(scaled.toFixed(digits))}${unit.suffix}`;
++}
++
++// 无头像时的占位首字（取用户名首字符，空则用「?」）。
++export function avatarInitial(username: string): string {
++  const trimmed = username.trim();
++  return trimmed ? trimmed[0].toUpperCase() : "?";
++}
++
++// key 打码展示（`sk-…abcd`）。仅保留可辨识前缀与末 4 位，绝不整段渲染 key 明文。
++export function maskKey(key: string): string {
++  const k = key.trim();
++  if (!k) return "";
++  if (k.length <= 7) return "…" + k.slice(-Math.min(4, k.length));
++  return `${k.slice(0, 3)}…${k.slice(-4)}`;
++}
++
++// 账户已用占比（0~100，整数）。总额度为 0 时返回 0，避免除零。
++export function usedPercent(usedQuota: number, quota: number): number {
++  if (quota <= 0) return 0;
++  return Math.min(100, Math.max(0, Math.round((usedQuota / quota) * 100)));
++}
++
++// per-key 使用率（0~100，整数）——已用 /（已用 + 剩余）。分母为 0 时返回 0。
++// unlimited 时该值无意义，调用点已用 unlimited 分支屏蔽。
++export function keyUsedPercent(tokenUsed: number, tokenRemain: number): number {
++  const granted = tokenUsed + tokenRemain;
++  if (granted <= 0) return 0;
++  return Math.min(100, Math.max(0, Math.round((tokenUsed / granted) * 100)));
++}
++
++// key 过期展示：把秒级时间戳转成人类可读文案 + 告警级别，供卡片过期提示用。
++//   - 0（永不过期）→ level "ok"，text "永不过期"
++//   - 已过期（expiresAt <= now）→ level "expired"，text "已过期"
++//   - 7 天内到期 → level "soon"，text "N 天后过期"（不足 1 天显示「今日到期」）
++//   - 更远 → level "ok"，text 本地日期（YYYY-MM-DD）
++// level 供渲染层决定是否用告警色；纯函数、不依赖时区库，用本地时间。
++export function formatExpiry(expiresAt: number): {
++  text: string;
++  level: "ok" | "soon" | "expired";
++} {
++  if (!Number.isFinite(expiresAt) || expiresAt <= 0)
++    return { text: "永不过期", level: "ok" };
++  const nowSec = Math.floor(Date.now() / 1000);
++  if (expiresAt <= nowSec) return { text: "已过期", level: "expired" };
++  const daysLeft = Math.ceil((expiresAt - nowSec) / 86400);
++  if (daysLeft <= 7) {
++    return {
++      text: daysLeft <= 1 ? "今日到期" : `${daysLeft} 天后过期`,
++      level: "soon",
++    };
++  }
++  const d = new Date(expiresAt * 1000);
++  const yyyy = d.getFullYear();
++  const mm = String(d.getMonth() + 1).padStart(2, "0");
++  const dd = String(d.getDate()).padStart(2, "0");
++  return { text: `${yyyy}-${mm}-${dd} 到期`, level: "ok" };
++}
++
++// key 状态文案：new-api TokenStatus（1 启用 / 2 禁用 / 3 过期 / 4 耗尽）。
++// 仅在非启用态需要在卡片上打徽标；启用态返回空串（调用方据此不渲染徽标）。
++export function keyStatusLabel(status: number): string {
++  switch (status) {
++    case 2:
++      return "已禁用";
++    case 3:
++      return "已过期";
++    case 4:
++      return "额度耗尽";
++    default:
++      return "";
++  }
++}
+diff --git a/src/lib/api/account.ts b/src/lib/api/account.ts
+new file mode 100644
+index 00000000..5dfbb594
+--- /dev/null
++++ b/src/lib/api/account.ts
+@@ -0,0 +1,63 @@
++// [ccs] new-api 账户体系前端接口封装。
++//
++// 只调后端 Tauri command（get_account_profile / get_account_models），不在前端直接
++// fetch new-api —— cc-switch 前端是 Tauri WebView，fetch 受 CORS 约束，故请求全走
++// Rust 侧 http_client 直发（见 src-tauri/src/services/account.rs）。接口方式与 open-code
++// 那套 cx-account-api.ts 完全一致，字段与 Rust AccountProfile（camelCase）1:1。
++
++import { invoke } from "@tauri-apps/api/core";
++
++// [ccs] 账户 profile 就绪态。额度类均为 new-api 原始 quota 整数，换算（QUOTA_PER_UNIT）
++// 在渲染层 format.ts 做（对齐 open-code：数据层不换算）。字段与后端 AccountProfile 对齐。
++export interface AccountProfile {
++  username: string;
++  displayName: string;
++  avatar: string;
++  // 账户额度来自 user.Quota（剩余）与 user.UsedQuota（累计），不受当前 key 是否不限额影响。
++  accountRemainingQuota: number;
++  accountUsedQuota: number;
++  accountTotalQuota: number;
++  accountQuotaUsedToday: number | null;
++  // 实际模型 token 数 = logs.prompt_tokens + logs.completion_tokens；与 API Key 记录严格区分。
++  accountTokensUsedToday: number | null;
++  accountPromptTokensToday: number | null;
++  accountCompletionTokensToday: number | null;
++  keyRemainingQuota: number;
++  keyUsedQuota: number;
++  keyQuotaUsedToday: number | null;
++  keyTokensUsedToday: number | null;
++  keyPromptTokensToday: number | null;
++  keyCompletionTokensToday: number | null;
++  keyUnlimitedQuota: boolean;
++  // 当前 key 生效的定价分组，及该分组是否走二开的动态倍率（auto 分组恒 false）。
++  keyGroup: string;
++  keyDynamicRatio: boolean;
++  // 当前 key 状态（1 启用 / 2 禁用 / 3 过期 / 4 耗尽）与过期时间（秒；0 表示永不过期）。
++  keyStatus: number;
++  keyExpiresAt: number;
++  // 当前 key 的模型白名单：未启用时 keyModelLimits 为空数组、表示不限模型。
++  keyModelLimitsEnabled: boolean;
++  keyModelLimits: string[];
++  requestCountToday: number | null;
++  // 该 key 在 new-api 侧的 token.Name。本地没填名称时 UI 直接用此字段展示。
++  tokenName: string;
++}
++
++// [ccs] profile 查询结果（对齐后端 AccountProfileResult）。确定性失败走 ok:false + error；
++// 就绪走 ok:true + profile。瞬时失败不在此体现（invoke 直接 reject → react-query retry）。
++export interface AccountProfileResult {
++  ok: boolean;
++  profile?: AccountProfile;
++  error?: string;
++}
++
++export const accountApi = {
++  // [ccs] 拉取账户 profile（余额/用量/当前 key 元数据）。凭据逐次传入（不同 key 可能属不同账户）。
++  // 瞬时传输失败会 reject（react-query retry + 保留上次成功值）；确定性失败走 ok:false。
++  getProfile: (baseUrl: string, apiKey: string): Promise<AccountProfileResult> =>
++    invoke("get_account_profile", { baseUrl, apiKey }),
++
++  // [ccs] 拉取某 key 的可用模型 id 列表（OpenAI 兼容 /v1/models）。脏响应/非 2xx 返回空数组。
++  getModels: (baseUrl: string, apiKey: string): Promise<string[]> =>
++    invoke("get_account_models", { baseUrl, apiKey }),
++};

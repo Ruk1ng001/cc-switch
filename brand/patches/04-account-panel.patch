@@ -1,0 +1,667 @@
+# 04-account-panel — new-api 账户面板 UI + 一键铺开（顶栏入口）
+#
+# 职责：把 02/03 的后端命令与展示函数组装成账户面板。cc-switch 里「一个 new-api key」=
+#       一条 providerType:"newapi" 的 UniversalProvider，因此面板零新增存储：直接读现成的
+#       universalProvidersApi.getAll() 里的 newapi 渠道，逐个拉 profile 展示余额/用量，并提供
+#       「绑定新账户」表单 + 「重新铺开到各 CLI」按钮（upsert + sync，等价 open-code 的激活写入）。
+#
+# 覆盖文件：
+#   - src/components/account/useAccountProfile.ts（新增）：React Query 封装，按 (baseUrl, 渠道 id)
+#     缓存，retry 1 + 保留上次成功值；对齐后端错误语义（Err→reject→retry；Ok(ok:false)→展示）。
+#   - src/components/account/KeyCard.tsx（新增）：单渠道卡片，余额/今日用量/key 额度/状态徽标/
+#     过期告警/动态倍率 + 重新铺开按钮。换算/打码全走 03 的 format.ts。
+#   - src/components/account/importKey.ts（新增）：bindAccount（NewAPI 预设组装新渠道→upsert+sync）
+#     + reapplyProvider（已有渠道重新 sync）。
+#   - src/components/account/AccountPanel.tsx（新增）：面板容器，列出 newapi 渠道 + 绑定表单。
+#   - src/App.tsx（改动）：顶栏加账户按钮（UserCircle）+ 底部挂 Dialog 包裹 AccountPanel。
+#     仅 5 处最小侵入（import ×2、state ×1、按钮 ×1、Dialog ×1），不动 currentView/View 类型系统。
+#
+# 接口方式与 open-code 完全一致：前端只调后端 command，不直接 fetch（Tauri WebView CORS 约束）。
+#
+# 依赖：依赖 02（后端命令）+ 03（前端接口/展示函数）已应用。
+# 应用（在 upstream/ 内，基线为 brand/BASE_SHA）：
+#   git -C upstream apply brand/patches/04-account-panel.patch
+diff --git a/src/App.tsx b/src/App.tsx
+index 645f1002..7c5c29f5 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -25,6 +25,7 @@ import {
+   Shield,
+   Cpu,
+   LayoutDashboard,
++  UserCircle,
+ } from "lucide-react";
+ import { getCurrentWindow } from "@tauri-apps/api/window";
+ import type { Provider, VisibleApps } from "@/types";
+@@ -82,6 +83,14 @@ import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
+ import { FirstRunNoticeDialog } from "@/components/FirstRunNoticeDialog";
+ import { AgentsPanel } from "@/components/agents/AgentsPanel";
+ import { UniversalProviderPanel } from "@/components/universal";
++// [ccs] 账户面板（余额/用量 + 一键铺开 key）。见 components/account/*。
++import { AccountPanel } from "@/components/account/AccountPanel";
++import {
++  Dialog,
++  DialogContent,
++  DialogHeader,
++  DialogTitle,
++} from "@/components/ui/dialog";
+ import { McpIcon } from "@/components/BrandIcons";
+ import { Button } from "@/components/ui/button";
+ import { SessionManagerPage } from "@/components/sessions/SessionManagerPage";
+@@ -174,6 +183,8 @@ function App() {
+   const sharedFeatureApp: AppId =
+     activeApp === "claude-desktop" ? "claude" : activeApp;
+   const [currentView, setCurrentView] = useState<View>(getInitialView);
++  // [ccs] 账户面板开关。用 Dialog 承载，不进 View 状态机——最小侵入，随官方升级不冲突。
++  const [accountPanelOpen, setAccountPanelOpen] = useState(false);
+   const [skillsDiscoverySource, setSkillsDiscoverySource] =
+     useState<SkillsPageSource>("repos");
+   const [settingsDefaultTab, setSettingsDefaultTab] = useState("general");
+@@ -1215,6 +1226,16 @@ function App() {
+                 >
+                   <Settings className="w-4 h-4" />
+                 </Button>
++                {/* [ccs] 账户面板入口：列出各 new-api 渠道的余额/用量并一键铺开到各 CLI */}
++                <Button
++                  variant="ghost"
++                  size="icon"
++                  onClick={() => setAccountPanelOpen(true)}
++                  title={t("account.title", { defaultValue: "账户" })}
++                  className="hover:bg-black/5 dark:hover:bg-white/5"
++                >
++                  <UserCircle className="w-4 h-4" />
++                </Button>
+                 <UpdateBadge
+                   onClick={() => {
+                     setSettingsDefaultTab("about");
+@@ -1659,6 +1680,23 @@ function App() {
+ 
+       <DeepLinkImportDialog />
+       <FirstRunNoticeDialog />
++
++      {/* [ccs] 账户面板：列出本地 newapi 渠道 + 绑定新账户/一键铺开到各 CLI */}
++      <Dialog open={accountPanelOpen} onOpenChange={setAccountPanelOpen}>
++        <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
++          <DialogHeader>
++            <DialogTitle>
++              {t("account.title", { defaultValue: "我的账户" })}
++            </DialogTitle>
++            <DialogDescription>
++              {t("account.subtitle", {
++                defaultValue: "管理 new-api 账户，一键铺开到各 CLI",
++              })}
++            </DialogDescription>
++          </DialogHeader>
++          <AccountPanel />
++        </DialogContent>
++      </Dialog>
+     </div>
+   );
+ }
+diff --git a/src/components/account/AccountPanel.tsx b/src/components/account/AccountPanel.tsx
+new file mode 100644
+index 00000000..7e5c32cd
+--- /dev/null
++++ b/src/components/account/AccountPanel.tsx
+@@ -0,0 +1,226 @@
++// [ccs] 账户面板容器。
++//
++// 列出所有 providerType:"newapi" 的 UniversalProvider（= 一个个 new-api key），逐个渲染 KeyCard
++// 展示余额/用量/key 元数据；并提供「绑定新账户」表单（复用 importKey.ts 的 bindAccount 组装
++// 一条 newapi 渠道 + 铺开到各 CLI）。KeyCard 的「重新铺开」走 reapplyProvider。
++//
++// 与 open-code 的账户体系对齐：那边是「账户 → 多 key → 激活写入各 CLI」；cc-switch 里没有独立的
++// 账户实体，一条 newapi 渠道即一个 key，绑定/激活统一落到 UniversalProvider 的 upsert + sync。
++// 渠道列表用 cc-switch 现成的 universalProvidersApi（settings KV 落盘），本层不新增任何存储。
++
++import { useCallback, useEffect, useState } from "react";
++import { useTranslation } from "react-i18next";
++import { UserPlus, RefreshCw } from "lucide-react";
++import { toast } from "sonner";
++import { Card, CardContent } from "@/components/ui/card";
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++import { Label } from "@/components/ui/label";
++import { universalProvidersApi } from "@/lib/api";
++import type { UniversalProvider, UniversalProvidersMap } from "@/types";
++import { KeyCard } from "./KeyCard";
++import { bindAccount, reapplyProvider } from "./importKey";
++
++export function AccountPanel() {
++  const { t } = useTranslation();
++
++  const [providers, setProviders] = useState<UniversalProvidersMap>({});
++  const [loading, setLoading] = useState(true);
++  // 正在「重新铺开」的渠道 id（禁用对应卡片按钮）。
++  const [reapplyingId, setReapplyingId] = useState<string | null>(null);
++
++  // 绑定表单
++  const [baseUrl, setBaseUrl] = useState("");
++  const [apiKey, setApiKey] = useState("");
++  const [name, setName] = useState("");
++  const [binding, setBinding] = useState(false);
++
++  const load = useCallback(async () => {
++    try {
++      setLoading(true);
++      const data = await universalProvidersApi.getAll();
++      setProviders(data);
++    } catch (error) {
++      console.error("Failed to load providers:", error);
++      toast.error(
++        t("account.loadListError", { defaultValue: "加载账户列表失败" }),
++      );
++    } finally {
++      setLoading(false);
++    }
++  }, [t]);
++
++  useEffect(() => {
++    load();
++  }, [load]);
++
++  // 只展示 newapi 渠道（一条 = 一个 new-api key）。按 sortIndex → createdAt 稳定排序。
++  const newapiProviders = Object.values(providers)
++    .filter((p) => p.providerType === "newapi")
++    .sort((a, b) => {
++      const si = (a.sortIndex ?? 0) - (b.sortIndex ?? 0);
++      if (si !== 0) return si;
++      return (a.createdAt ?? 0) - (b.createdAt ?? 0);
++    });
++
++  const handleBind = useCallback(async () => {
++    if (!baseUrl.trim() || !apiKey.trim()) {
++      toast.error(
++        t("account.bindMissing", {
++          defaultValue: "请填写接口地址和 API Key",
++        }),
++      );
++      return;
++    }
++    try {
++      setBinding(true);
++      await bindAccount({ baseUrl, apiKey, name });
++      toast.success(
++        t("account.bindSuccess", { defaultValue: "已绑定并铺开到各 CLI" }),
++      );
++      setBaseUrl("");
++      setApiKey("");
++      setName("");
++      await load();
++    } catch (error) {
++      const message = error instanceof Error ? error.message : String(error);
++      toast.error(
++        t("account.bindError", {
++          defaultValue: "绑定失败：{{error}}",
++          error: message,
++        }),
++      );
++    } finally {
++      setBinding(false);
++    }
++  }, [baseUrl, apiKey, name, load, t]);
++
++  const handleReapply = useCallback(
++    async (provider: UniversalProvider) => {
++      try {
++        setReapplyingId(provider.id);
++        await reapplyProvider(provider);
++        toast.success(
++          t("account.reapplySuccess", { defaultValue: "已重新铺开到各 CLI" }),
++        );
++      } catch (error) {
++        const message = error instanceof Error ? error.message : String(error);
++        toast.error(
++          t("account.reapplyError", {
++            defaultValue: "铺开失败：{{error}}",
++            error: message,
++          }),
++        );
++      } finally {
++        setReapplyingId(null);
++      }
++    },
++    [t],
++  );
++
++  return (
++    <div className="space-y-4">
++      {/* 绑定新账户表单 */}
++      <Card>
++        <CardContent className="p-4 space-y-3">
++          <div className="flex items-center gap-2">
++            <UserPlus className="w-4 h-4 text-muted-foreground" />
++            <span className="font-medium">
++              {t("account.bindTitle", { defaultValue: "绑定新账户" })}
++            </span>
++          </div>
++          <div className="grid gap-3 sm:grid-cols-2">
++            <div className="space-y-1">
++              <Label htmlFor="ccs-account-baseurl">
++                {t("account.baseUrl", { defaultValue: "接口地址" })}
++              </Label>
++              <Input
++                id="ccs-account-baseurl"
++                value={baseUrl}
++                onChange={(e) => setBaseUrl(e.target.value)}
++                placeholder="https://your-newapi.example.com"
++                disabled={binding}
++              />
++            </div>
++            <div className="space-y-1">
++              <Label htmlFor="ccs-account-name">
++                {t("account.displayName", { defaultValue: "展示名（可选）" })}
++              </Label>
++              <Input
++                id="ccs-account-name"
++                value={name}
++                onChange={(e) => setName(e.target.value)}
++                placeholder={t("account.namePlaceholder", {
++                  defaultValue: "留空用远端名称",
++                })}
++                disabled={binding}
++              />
++            </div>
++            <div className="space-y-1 sm:col-span-2">
++              <Label htmlFor="ccs-account-key">
++                {t("account.apiKey", { defaultValue: "API Key" })}
++              </Label>
++              <Input
++                id="ccs-account-key"
++                type="password"
++                value={apiKey}
++                onChange={(e) => setApiKey(e.target.value)}
++                placeholder="sk-..."
++                disabled={binding}
++              />
++            </div>
++          </div>
++          <div className="flex justify-end">
++            <Button onClick={handleBind} disabled={binding}>
++              {binding
++                ? t("account.binding", { defaultValue: "绑定中…" })
++                : t("account.bind", { defaultValue: "绑定并铺开" })}
++            </Button>
++          </div>
++        </CardContent>
++      </Card>
++
++      {/* 已绑定的 key 列表 */}
++      <div className="flex items-center justify-between">
++        <span className="text-sm text-muted-foreground">
++          {t("account.listTitle", {
++            defaultValue: "已绑定账户",
++          })}
++          {newapiProviders.length > 0 ? ` (${newapiProviders.length})` : ""}
++        </span>
++        <Button
++          variant="ghost"
++          size="icon"
++          onClick={load}
++          disabled={loading}
++          title={t("account.reloadList", { defaultValue: "刷新列表" })}
++        >
++          <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
++        </Button>
++      </div>
++
++      {loading ? (
++        <div className="text-sm text-muted-foreground py-8 text-center">
++          {t("account.loading", { defaultValue: "加载中…" })}
++        </div>
++      ) : newapiProviders.length === 0 ? (
++        <div className="text-sm text-muted-foreground py-8 text-center">
++          {t("account.empty", {
++            defaultValue: "还没有绑定任何账户，用上方表单绑定第一个",
++          })}
++        </div>
++      ) : (
++        <div className="grid gap-3 sm:grid-cols-2">
++          {newapiProviders.map((provider) => (
++            <KeyCard
++              key={provider.id}
++              provider={provider}
++              onImport={handleReapply}
++              importing={reapplyingId === provider.id}
++            />
++          ))}
++        </div>
++      )}
++    </div>
++  );
++}
+diff --git a/src/components/account/KeyCard.tsx b/src/components/account/KeyCard.tsx
+new file mode 100644
+index 00000000..8f363c52
+--- /dev/null
++++ b/src/components/account/KeyCard.tsx
+@@ -0,0 +1,203 @@
++// [ccs] 账户面板里的单个 key 卡片。
++//
++// cc-switch 里「一个 new-api key」= 一条 providerType:"newapi" 的 UniversalProvider。
++// 本卡片拿单条渠道的 {baseUrl, apiKey} 调 useAccountProfile 拉 profile，展示：
++//   - key 打码 + 展示名（本地 name 优先，空则用远端 token.Name）；
++//   - 账户余额 / 今日用量 / 当前 key 额度（unlimited 时显示「额度不限」）；
++//   - 状态徽标（禁用/过期/耗尽）、过期告警、动态倍率；
++//   - 「重新铺开到 Claude/Codex/Gemini」按钮（走一键导入，见补丁 05）。
++//
++// 换算/打码/使用率全走 03 的 format.ts 纯函数（与 open-code 同源）。key 明文绝不整段渲染。
++
++import { RefreshCw } from "lucide-react";
++import { useTranslation } from "react-i18next";
++import { Card, CardContent } from "@/components/ui/card";
++import { Badge } from "@/components/ui/badge";
++import { Button } from "@/components/ui/button";
++import { ProviderIcon } from "@/components/ProviderIcon";
++import type { UniversalProvider } from "@/types";
++import { useAccountProfile } from "./useAccountProfile";
++import {
++  formatCurrency,
++  formatTokenCount,
++  maskKey,
++  usedPercent,
++  keyUsedPercent,
++  formatExpiry,
++  keyStatusLabel,
++} from "@/lib/account/format";
++
++interface KeyCardProps {
++  provider: UniversalProvider;
++  // 重新铺开到各 CLI（补丁 05 接线）。可选：未接线时按钮不渲染。
++  onImport?: (provider: UniversalProvider) => void;
++  importing?: boolean;
++}
++
++export function KeyCard({ provider, onImport, importing }: KeyCardProps) {
++  const { t } = useTranslation();
++  const { data, isFetching, isError, refetch } = useAccountProfile({
++    keyId: provider.id,
++    baseUrl: provider.baseUrl,
++    apiKey: provider.apiKey,
++  });
++
++  const profile = data?.ok ? data.profile : undefined;
++  // 展示名：本地 name 优先，空则用远端 token.Name，再空用占位。
++  const displayName =
++    provider.name.trim() ||
++    profile?.tokenName.trim() ||
++    t("account.unnamedKey", { defaultValue: "未命名 key" });
++
++  const errorText =
++    (data && !data.ok ? data.error : undefined) ??
++    (isError
++      ? t("account.loadError", { defaultValue: "加载失败，稍后重试" })
++      : undefined);
++
++  const expiry = profile ? formatExpiry(profile.keyExpiresAt) : null;
++  const statusLabel = profile ? keyStatusLabel(profile.keyStatus) : "";
++
++  return (
++    <Card>
++      <CardContent className="p-4 space-y-3">
++        {/* 头部：图标 + 名称 + 打码 key + 徽标 + 刷新 */}
++        <div className="flex items-start justify-between gap-3">
++          <div className="flex items-center gap-3 min-w-0">
++            <ProviderIcon
++              icon={provider.icon}
++              name={provider.name}
++              size={28}
++            />
++            <div className="min-w-0">
++              <div className="flex items-center gap-2">
++                <span className="font-medium truncate">{displayName}</span>
++                {statusLabel && (
++                  <Badge variant="destructive">{statusLabel}</Badge>
++                )}
++                {profile?.keyDynamicRatio && (
++                  <Badge variant="secondary">
++                    {t("account.dynamicRatio", { defaultValue: "动态倍率" })}
++                  </Badge>
++                )}
++                {expiry && expiry.level !== "ok" && (
++                  <Badge
++                    variant={
++                      expiry.level === "expired" ? "destructive" : "secondary"
++                    }
++                  >
++                    {expiry.text}
++                  </Badge>
++                )}
++              </div>
++              <span className="text-xs text-muted-foreground font-mono">
++                {maskKey(provider.apiKey)}
++              </span>
++            </div>
++          </div>
++          <Button
++            variant="ghost"
++            size="icon"
++            onClick={() => refetch()}
++            title={t("account.refresh", { defaultValue: "刷新" })}
++            disabled={isFetching}
++          >
++            <RefreshCw
++              className={`w-4 h-4 ${isFetching ? "animate-spin" : ""}`}
++            />
++          </Button>
++        </div>
++
++        {/* 错误态 */}
++        {errorText && (
++          <div className="text-xs text-destructive">{errorText}</div>
++        )}
++
++        {/* 就绪态：余额 + 用量指标 */}
++        {profile && (
++          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
++            <Metric
++              label={t("account.accountBalance", { defaultValue: "账户余额" })}
++              value={formatCurrency(profile.accountRemainingQuota)}
++            />
++            <Metric
++              label={t("account.todayTokens", { defaultValue: "今日 Tokens" })}
++              value={formatTokenCount(profile.accountTokensUsedToday)}
++            />
++            <Metric
++              label={t("account.keyQuota", { defaultValue: "Key 额度" })}
++              value={
++                profile.keyUnlimitedQuota
++                  ? t("account.unlimited", { defaultValue: "不限" })
++                  : formatCurrency(profile.keyRemainingQuota)
++              }
++            />
++            <Metric
++              label={t("account.todayRequests", { defaultValue: "今日请求" })}
++              value={
++                profile.requestCountToday === null
++                  ? "—"
++                  : String(profile.requestCountToday)
++              }
++            />
++          </div>
++        )}
++
++        {/* 账户额度使用率条（unlimited 不展示） */}
++        {profile && !profile.keyUnlimitedQuota && (
++          <UsageBar
++            percent={
++              profile.accountTotalQuota > 0
++                ? usedPercent(
++                    profile.accountUsedQuota,
++                    profile.accountTotalQuota,
++                  )
++                : keyUsedPercent(
++                    profile.keyUsedQuota,
++                    profile.keyRemainingQuota,
++                  )
++            }
++          />
++        )}
++
++        {/* 重新铺开按钮 */}
++        {onImport && (
++          <div className="flex justify-end">
++            <Button
++              variant="outline"
++              size="sm"
++              onClick={() => onImport(provider)}
++              disabled={importing}
++            >
++              {importing
++                ? t("account.importing", { defaultValue: "铺开中…" })
++                : t("account.importToClis", {
++                    defaultValue: "重新铺开到各 CLI",
++                  })}
++            </Button>
++          </div>
++        )}
++      </CardContent>
++    </Card>
++  );
++}
++
++function Metric({ label, value }: { label: string; value: string }) {
++  return (
++    <div className="space-y-0.5">
++      <div className="text-xs text-muted-foreground">{label}</div>
++      <div className="text-sm font-semibold tabular-nums">{value}</div>
++    </div>
++  );
++}
++
++function UsageBar({ percent }: { percent: number }) {
++  return (
++    <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
++      <div
++        className="h-full rounded-full bg-blue-500 transition-all"
++        style={{ width: `${percent}%` }}
++      />
++    </div>
++  );
++}
+diff --git a/src/components/account/importKey.ts b/src/components/account/importKey.ts
+new file mode 100644
+index 00000000..2818b452
+--- /dev/null
++++ b/src/components/account/importKey.ts
+@@ -0,0 +1,66 @@
++// [ccs] 一键导入 / 铺开逻辑。
++//
++// cc-switch 里「一个 new-api key」= 一条 providerType:"newapi" 的 UniversalProvider，
++// upsert 后 sync 会把该 {baseUrl, apiKey} + 预设模型一次性写进 Claude / Codex / Gemini 三个 CLI。
++// 这里封装两条路径：
++//   - bindAccount：账户面板表单「绑定新账户」——用 NewAPI 预设新建一条渠道，upsert + sync；
++//   - reapplyProvider：KeyCard「重新铺开到各 CLI」——已有渠道重新 sync（凭据/模型没变，仅重写 CLI 配置）。
++//
++// 与 open-code 对齐：open-code 那边「激活 key」= 把选中 key 写进各 CLI 的 env；这里等价动作是
++// upsert + sync（sync 即 cc-switch 的落盘到各应用配置）。
++
++import { universalProvidersApi } from "@/lib/api";
++import {
++  createUniversalProviderFromPreset,
++  findPresetByType,
++} from "@/config/universalProviderPresets";
++import { generateUUID } from "@/utils/uuid";
++import type { UniversalProvider } from "@/types";
++
++// [ccs] 规整 baseUrl：去掉尾部斜杠。后端 derive_api_base 会再做 /api/... 拼接，这里只做表层清理。
++function normalizeBaseUrl(raw: string): string {
++  return raw.trim().replace(/\/+$/, "");
++}
++
++export interface BindAccountArgs {
++  baseUrl: string;
++  apiKey: string;
++  // 展示名。留空则回落到预设名 "NewAPI"（远端 token.Name 由卡片按需覆盖展示）。
++  name?: string;
++}
++
++// [ccs] 绑定新账户：用 NewAPI 预设组装一条 newapi 渠道并落盘到各 CLI。返回新建的渠道。
++// 失败（找不到预设 / upsert 失败）抛错，由调用方（AccountPanel）捕获展示。
++export async function bindAccount({
++  baseUrl,
++  apiKey,
++  name,
++}: BindAccountArgs): Promise<UniversalProvider> {
++  const preset = findPresetByType("newapi");
++  if (!preset) {
++    throw new Error("缺少 NewAPI 预设，无法绑定账户");
++  }
++
++  const provider = createUniversalProviderFromPreset(
++    preset,
++    generateUUID(),
++    normalizeBaseUrl(baseUrl),
++    apiKey.trim(),
++    name?.trim() || undefined,
++  );
++
++  const ok = await universalProvidersApi.upsert(provider);
++  if (!ok) {
++    throw new Error("保存渠道失败");
++  }
++  // 铺开到 Claude / Codex / Gemini。sync 失败不影响渠道已存在，交由调用方决定是否提示。
++  await universalProvidersApi.sync(provider.id);
++  return provider;
++}
++
++// [ccs] 重新铺开已有渠道到各 CLI：凭据/模型未变，仅重写 CLI 配置（等价 open-code 的重新激活）。
++export async function reapplyProvider(
++  provider: UniversalProvider,
++): Promise<void> {
++  await universalProvidersApi.sync(provider.id);
++}
+diff --git a/src/components/account/useAccountProfile.ts b/src/components/account/useAccountProfile.ts
+new file mode 100644
+index 00000000..f45d4071
+--- /dev/null
++++ b/src/components/account/useAccountProfile.ts
+@@ -0,0 +1,48 @@
++// [ccs] 账户 profile 查询 hook（React Query）。
++//
++// 用 cc-switch 现成的 @tanstack/react-query（SWR 缓存 + retry），替代 open-code 那边手写的
++// requestVersions 防竞态 + localStorage 缓存。逐个 newapi 渠道（UniversalProvider）拉 profile：
++// 后端 get_account_profile 用 Rust http_client 直发绕 CORS（见 services/account.rs）。
++//
++// 错误语义对齐后端：瞬时失败后端返回 Err → 这里 reject → react-query retry + 保留上次成功值；
++// 确定性失败后端返回 Ok(ok:false) → 落到 data.ok=false，由 UI 展示 error 文案（不 retry）。
++
++import { useQuery } from "@tanstack/react-query";
++import { accountApi, type AccountProfileResult } from "@/lib/api/account";
++
++// [ccs] 账户 profile 的 queryKey 工厂。按 (baseUrl, 稳定渠道 id) 区分不同 key 的查询缓存——
++// 不把明文 apiKey 放进 queryKey（避免明文进 react-query devtools / 缓存快照）。
++export const accountKeys = {
++  all: ["account"] as const,
++  profile: (baseUrl: string, keyId: string) =>
++    ["account", "profile", baseUrl, keyId] as const,
++  models: (baseUrl: string, keyId: string) =>
++    ["account", "models", baseUrl, keyId] as const,
++};
++
++interface UseAccountProfileArgs {
++  // 用于缓存区分的稳定 id（用渠道 id，不用明文 key）。
++  keyId: string;
++  baseUrl: string;
++  apiKey: string;
++  enabled?: boolean;
++}
++
++// [ccs] 拉取单个 key/渠道的账户 profile。凭据传给后端逐 key 查询（不同 key 可能属不同账户）。
++export function useAccountProfile({
++  keyId,
++  baseUrl,
++  apiKey,
++  enabled = true,
++}: UseAccountProfileArgs) {
++  return useQuery<AccountProfileResult>({
++    queryKey: accountKeys.profile(baseUrl, keyId),
++    queryFn: async () => accountApi.getProfile(baseUrl, apiKey),
++    enabled: enabled && Boolean(baseUrl) && Boolean(apiKey),
++    // 对齐 useProviderUsage：瞬时失败 reject 时 retry 一次并保留旧 data。
++    retry: 1,
++    retryDelay: 1500,
++    staleTime: 5 * 60 * 1000, // 5 分钟：余额/用量不需实时，减少请求。
++    refetchOnWindowFocus: false,
++  });
++}

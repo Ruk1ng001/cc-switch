@@ -1,0 +1,177 @@
+name: auto-upgrade
+
+# 每日自动升级 cc-switch 上游基线（brand/BASE_TAG + BASE_SHA + submodule gitlink）。
+#
+# 设计（对齐 brand/ 补丁叠加层架构，与 Dokng 那套同构，仅适配 Tauri + pnpm）：
+#   - submodule（upstream/）永远锁在「干净的上游 tag」，定制全在 brand/patches/*.patch；
+#   - 「升级」= 把基线 tag 推进到上游最新稳定 tag，并验证所有补丁仍能干净重放。
+#
+# 流程（单 job，任一步失败即报错、GitHub 通知维护者手动介入）：
+#   detect   —— fetch submodule tag，筛出最新稳定 tag（vX.Y.Z），与 BASE_TAG 比较；
+#               无新版本 → no-op 成功退出；有降级风险（当前反而更新）→ 不动。
+#   validate —— submodule 干净 checkout 到新 tag → 按 NN 序 strict `git apply` 全部补丁
+#               （与出包流程完全一致的重放方式）→ pnpm install → pnpm typecheck。
+#   commit   —— 全通过 → 恢复 submodule 干净（gitlink 指向干净 tag，不含补丁）→
+#               更新 BASE_TAG/BASE_SHA/gitlink → 提交 → 用 PAT 直推 main。
+#
+# 为什么用 PAT 推送：
+#   GitHub 默认的 GITHUB_TOKEN 推 main 不会触发其它 workflow（防无限循环），
+#   而升级后需要触发出包流程，故用 RELEASE_PAT（repo 权限）推送。
+#   若暂未接出包流程，用默认 GITHUB_TOKEN 也可（只推基线，不触发下游）。
+#
+# 触发：
+#   - schedule：UTC 16:37 = 北京时间次日 00:37（凌晨，错开整点与上游发布高峰）；
+#   - workflow_dispatch：手动随时触发。
+
+on:
+  schedule:
+    # 北京时间 00:37（UTC+8） → UTC 16:37。避开整点，减少与上游发布高峰重叠。
+    - cron: "37 16 * * *"
+  workflow_dispatch:
+
+# 同时只跑一个升级流水线，避免并发写 main。
+concurrency:
+  group: auto-upgrade
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout（含 submodule；用 PAT 以便推送能触发下游 workflow）
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          # RELEASE_PAT：repo 权限的 PAT。用它 checkout，后续 git push 即带 PAT 凭据，
+          # 推 main 才能触发出包 workflow（默认 GITHUB_TOKEN 不触发其它 workflow）。
+          # 未配置 RELEASE_PAT 时回退默认 GITHUB_TOKEN（只推基线，不触发下游出包）。
+          token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: 检测上游最新稳定 tag
+        id: detect
+        run: |
+          set -euo pipefail
+          CURRENT="$(tr -d '[:space:]' < brand/BASE_TAG)"
+          echo "当前基线 tag：$CURRENT"
+
+          # 拉取 submodule 所有 tag（origin = farion1231/cc-switch，已同步上游）。
+          git -C upstream fetch --tags --quiet origin
+
+          # 只认稳定版 tag vX.Y.Z（排除 -rc / beta / pr-* 等），按语义版本取最大。
+          LATEST="$(git -C upstream tag -l 'v*' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V | tail -1)"
+          echo "上游最新稳定 tag：${LATEST:-<无>}"
+
+          if [ -z "$LATEST" ]; then
+            echo "未找到任何稳定 tag，异常退出。" >&2
+            exit 1
+          fi
+
+          # 降级保护：只有当 LATEST 严格新于 CURRENT 时才升级。
+          NEWEST="$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -V | tail -1)"
+          if [ "$LATEST" != "$CURRENT" ] && [ "$NEWEST" = "$LATEST" ]; then
+            echo "发现新版本：$CURRENT → $LATEST"
+            echo "need=true" >> "$GITHUB_OUTPUT"
+            echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+          else
+            echo "已是最新（或当前基线更新），无需升级。"
+            echo "need=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 安装 pnpm
+        if: steps.detect.outputs.need == 'true'
+        uses: pnpm/action-setup@v4
+        with:
+          # 上游 package.json 无 packageManager 字段，action-setup 无法自动推断，
+          # 必须显式给版本。cc-switch 用 pnpm 9.x，此处锁大版本；上游若升 pnpm，
+          # 补丁重放/typecheck 报错会通知维护者，届时同步调这里即可。
+          version: 9
+
+      - name: 安装 Node
+        if: steps.detect.outputs.need == 'true'
+        uses: actions/setup-node@v4
+        with:
+          # 上游 package.json 无 engines/volta、仓库无 .nvmrc，node-version-file 会报错。
+          # 故显式指定 Node LTS（20.x）。cache 走 pnpm-lock.yaml。
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: upstream/pnpm-lock.yaml
+
+      - name: 切到新 tag 并按 NN 序重放补丁（strict apply）
+        if: steps.detect.outputs.need == 'true'
+        env:
+          LATEST: ${{ steps.detect.outputs.latest }}
+        run: |
+          set -euo pipefail
+          # 干净 checkout 到新 tag（detached）；清掉任何残留，确保基线纯净。
+          git -C upstream checkout --quiet "$LATEST"
+          git -C upstream reset --hard --quiet
+          git -C upstream clean -fdq
+
+          # 用统一的重放脚本（strict apply）落地补丁——与出包流程同一来源，避免逻辑漂移。
+          # 此刻 brand/BASE_SHA 还是旧基线（升级成功后才刷新），脚本会 warn HEAD≠BASE_SHA，
+          # 但不致命：apply 模式只要求 upstream/ 工作区干净 + 补丁精确适用；任一补丁失败即非 0
+          # → 步骤失败 → 通知维护者手动介入。
+          echo "按 NN 序重放补丁到 $LATEST："
+          scripts/apply-patches.sh
+          echo "全部补丁 apply 成功。"
+
+      - name: 安装依赖 + typecheck（前端自洽校验）
+        if: steps.detect.outputs.need == 'true'
+        working-directory: upstream
+        run: |
+          set -euo pipefail
+          # pnpm install 加重试：npm registry 偶发单包 tarball 下载失败，一次失败即中断。
+          # 重试 3 次、间隔递增（15s/30s）消除瞬时网络抖动；三次仍失败才真正报错。
+          for attempt in 1 2 3; do
+            pnpm install --frozen-lockfile && break
+            if [ "$attempt" = 3 ]; then
+              echo "pnpm install 连续 3 次失败，放弃。" >&2
+              exit 1
+            fi
+            echo "pnpm install 第 $attempt 次失败，$((attempt * 15))s 后重试…" >&2
+            sleep $((attempt * 15))
+          done
+          # 前端 typecheck，快速验证补丁应用后类型仍自洽（Rust 侧 cargo check 需完整
+          # 工具链、耗时长，定制大概率在前端，故此处只做前端校验；如需 Rust 校验后续再加）。
+          pnpm typecheck
+
+      - name: 校验通过 → 更新基线、提交并推送 main
+        if: steps.detect.outputs.need == 'true'
+        env:
+          LATEST: ${{ steps.detect.outputs.latest }}
+        run: |
+          set -euo pipefail
+          # 恢复 submodule 干净：撤销临时 apply 的补丁，gitlink 记录的是干净 tag 的 HEAD。
+          git -C upstream reset --hard --quiet
+          git -C upstream clean -fdq
+
+          NEWSHA="$(git -C upstream rev-parse HEAD)"
+          echo "新基线：$LATEST（$NEWSHA）"
+
+          # 更新基线双文件（保留尾换行，与既有格式一致）。
+          printf '%s\n' "$LATEST" > brand/BASE_TAG
+          printf '%s\n' "$NEWSHA" > brand/BASE_SHA
+
+          git add brand/BASE_TAG brand/BASE_SHA upstream
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(cc-switch): 自动升级基线到 ${LATEST}（每日自动）"
+
+          # 推 main（保存基线推进）。
+          git push origin HEAD:main
+          echo "已推送 main。"
+
+          # 计算下一个 ccs 版本 tag（vX.Y.Z-ccs.N，基于新基线 BASE_TAG），打 tag 并推送。
+          # 出包 workflow 接入后，触发器可设为 push tags v*，推这个 tag 才会触发自动出包。
+          git fetch --tags --quiet origin || true
+          NEWTAG="$(scripts/next-version.sh)"
+          echo "新 ccs 版本 tag：$NEWTAG"
+          git tag "$NEWTAG"
+          git push origin "$NEWTAG"
+          echo "已推送 tag $NEWTAG。"

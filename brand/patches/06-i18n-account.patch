@@ -1,0 +1,182 @@
+# 06-i18n-account — 账户面板 i18n 文案（4 语言）
+#
+# 职责：为 04/05 补丁引入的 account.* 命名空间补齐 4 个 locale 的翻译。
+#       04 的组件里所有 t() 调用都带 defaultValue（中文兜底），本补丁缺失时 UI 仍可用中文回落；
+#       本补丁使 en / ja / zh-TW 也显示对应语言，zh 显示规范中文。
+#
+# 覆盖文件（均为纯新增行，插在文件首个 "{" 之后作为顶层 "account" 命名空间）：
+#   - src/i18n/locales/zh.json
+#   - src/i18n/locales/zh-TW.json
+#   - src/i18n/locales/en.json
+#   - src/i18n/locales/ja.json
+#
+# key 集合与 04/05 组件中 t("account.*") 引用严格 1:1（经脚本比对：零缺失、零多余，各 30 个 key）。
+# 采用「首行后插入」而非重排，最大化减少与上游 locale 的 diff 面（仅新增行，不动既有翻译字节）。
+#
+# 依赖：04（账户面板 UI，引用 account.* key）。与其它补丁不共享文件。
+# 应用（在 upstream/ 内，基线为 brand/BASE_SHA）：
+#   git -C upstream apply brand/patches/06-i18n-account.patch
+diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
+index 4dd0b9a6..905e2d50 100644
+--- a/src/i18n/locales/en.json
++++ b/src/i18n/locales/en.json
+@@ -1,4 +1,36 @@
+ {
++  "account": {
++    "title": "My Account",
++    "subtitle": "Manage new-api accounts and deploy to all CLIs in one click",
++    "listTitle": "Bound accounts",
++    "reloadList": "Refresh list",
++    "empty": "No accounts bound yet. Use the form above to bind your first one.",
++    "bindTitle": "Bind new account",
++    "baseUrl": "Endpoint URL",
++    "apiKey": "API Key",
++    "displayName": "Display name (optional)",
++    "namePlaceholder": "Leave blank to use the remote name",
++    "bind": "Bind and deploy",
++    "binding": "Binding…",
++    "bindMissing": "Please fill in the endpoint URL and API Key",
++    "bindSuccess": "Bound and deployed to all CLIs",
++    "bindError": "Bind failed: {{error}}",
++    "loading": "Loading…",
++    "loadListError": "Failed to load account list",
++    "unnamedKey": "Unnamed key",
++    "refresh": "Refresh",
++    "loadError": "Load failed, try again later",
++    "dynamicRatio": "Dynamic ratio",
++    "accountBalance": "Account balance",
++    "todayTokens": "Tokens today",
++    "keyQuota": "Key quota",
++    "todayRequests": "Requests today",
++    "unlimited": "Unlimited",
++    "importToClis": "Redeploy to all CLIs",
++    "importing": "Deploying…",
++    "reapplySuccess": "Redeployed to all CLIs",
++    "reapplyError": "Deploy failed: {{error}}"
++  },
+   "app": {
+     "title": "CC Switch",
+     "description": "All-in-One Assistant for Claude Code, Codex & Gemini CLI"
+diff --git a/src/i18n/locales/ja.json b/src/i18n/locales/ja.json
+index 94dfe2c5..4f4ea73a 100644
+--- a/src/i18n/locales/ja.json
++++ b/src/i18n/locales/ja.json
+@@ -1,4 +1,36 @@
+ {
++  "account": {
++    "title": "マイアカウント",
++    "subtitle": "new-api アカウントを管理し、各 CLI にワンクリックで展開",
++    "listTitle": "バインド済みアカウント",
++    "reloadList": "リストを更新",
++    "empty": "まだアカウントがバインドされていません。上のフォームで最初のアカウントをバインドしてください。",
++    "bindTitle": "新しいアカウントをバインド",
++    "baseUrl": "エンドポイント URL",
++    "apiKey": "API Key",
++    "displayName": "表示名（任意）",
++    "namePlaceholder": "空欄の場合はリモート名を使用",
++    "bind": "バインドして展開",
++    "binding": "バインド中…",
++    "bindMissing": "エンドポイント URL と API Key を入力してください",
++    "bindSuccess": "各 CLI にバインドして展開しました",
++    "bindError": "バインド失敗：{{error}}",
++    "loading": "読み込み中…",
++    "loadListError": "アカウントリストの読み込みに失敗しました",
++    "unnamedKey": "名前のない key",
++    "refresh": "更新",
++    "loadError": "読み込みに失敗しました。後でもう一度お試しください",
++    "dynamicRatio": "動的レート",
++    "accountBalance": "アカウント残高",
++    "todayTokens": "本日の Tokens",
++    "keyQuota": "Key クォータ",
++    "todayRequests": "本日のリクエスト",
++    "unlimited": "無制限",
++    "importToClis": "各 CLI に再展開",
++    "importing": "展開中…",
++    "reapplySuccess": "各 CLI に再展開しました",
++    "reapplyError": "展開失敗：{{error}}"
++  },
+   "app": {
+     "title": "CC Switch",
+     "description": "Claude Code・Codex・Gemini CLI のためのオールインワンアシスタント"
+diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
+index 8cab77aa..73c7efd8 100644
+--- a/src/i18n/locales/zh-TW.json
++++ b/src/i18n/locales/zh-TW.json
+@@ -1,4 +1,36 @@
+ {
++  "account": {
++    "title": "我的帳戶",
++    "subtitle": "管理 new-api 帳戶，一鍵鋪開到各 CLI",
++    "listTitle": "已綁定帳戶",
++    "reloadList": "重新整理列表",
++    "empty": "還沒有綁定任何帳戶，用上方表單綁定第一個",
++    "bindTitle": "綁定新帳戶",
++    "baseUrl": "介面位址",
++    "apiKey": "API Key",
++    "displayName": "顯示名稱（可選）",
++    "namePlaceholder": "留空使用遠端名稱",
++    "bind": "綁定並鋪開",
++    "binding": "綁定中…",
++    "bindMissing": "請填寫介面位址和 API Key",
++    "bindSuccess": "已綁定並鋪開到各 CLI",
++    "bindError": "綁定失敗：{{error}}",
++    "loading": "載入中…",
++    "loadListError": "載入帳戶列表失敗",
++    "unnamedKey": "未命名 key",
++    "refresh": "重新整理",
++    "loadError": "載入失敗，稍後重試",
++    "dynamicRatio": "動態倍率",
++    "accountBalance": "帳戶餘額",
++    "todayTokens": "今日 Tokens",
++    "keyQuota": "Key 額度",
++    "todayRequests": "今日請求",
++    "unlimited": "不限",
++    "importToClis": "重新鋪開到各 CLI",
++    "importing": "鋪開中…",
++    "reapplySuccess": "已重新鋪開到各 CLI",
++    "reapplyError": "鋪開失敗：{{error}}"
++  },
+   "app": {
+     "title": "CC Switch",
+     "description": "Claude Code / Codex / Gemini CLI 全方位輔助工具"
+diff --git a/src/i18n/locales/zh.json b/src/i18n/locales/zh.json
+index b0f60dd3..909a2657 100644
+--- a/src/i18n/locales/zh.json
++++ b/src/i18n/locales/zh.json
+@@ -1,4 +1,36 @@
+ {
++  "account": {
++    "title": "我的账户",
++    "subtitle": "管理 new-api 账户，一键铺开到各 CLI",
++    "listTitle": "已绑定账户",
++    "reloadList": "刷新列表",
++    "empty": "还没有绑定任何账户，用上方表单绑定第一个",
++    "bindTitle": "绑定新账户",
++    "baseUrl": "接口地址",
++    "apiKey": "API Key",
++    "displayName": "展示名（可选）",
++    "namePlaceholder": "留空用远端名称",
++    "bind": "绑定并铺开",
++    "binding": "绑定中…",
++    "bindMissing": "请填写接口地址和 API Key",
++    "bindSuccess": "已绑定并铺开到各 CLI",
++    "bindError": "绑定失败：{{error}}",
++    "loading": "加载中…",
++    "loadListError": "加载账户列表失败",
++    "unnamedKey": "未命名 key",
++    "refresh": "刷新",
++    "loadError": "加载失败，稍后重试",
++    "dynamicRatio": "动态倍率",
++    "accountBalance": "账户余额",
++    "todayTokens": "今日 Tokens",
++    "keyQuota": "Key 额度",
++    "todayRequests": "今日请求",
++    "unlimited": "不限",
++    "importToClis": "重新铺开到各 CLI",
++    "importing": "铺开中…",
++    "reapplySuccess": "已重新铺开到各 CLI",
++    "reapplyError": "铺开失败：{{error}}"
++  },
+   "app": {
+     "title": "CC Switch",
+     "description": "Claude Code / Codex / Gemini CLI 全方位辅助工具"

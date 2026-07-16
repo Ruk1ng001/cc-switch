@@ -1,0 +1,488 @@
+# 02-account-profile-backend — new-api 账户体系后端接口层（profile + models）
+#
+# 职责：新增 Rust 服务 + 命令，对接自建 new-api 的只读账户接口，供后续「账户面板 +
+#       一键导入 key」补丁使用。接口方式与 open-code 那套 cx-account-api.ts 完全一致。
+#
+# 覆盖文件：
+#   - src-tauri/src/services/account.rs（新增）：fetch_profile / fetch_models
+#   - src-tauri/src/commands/account.rs（新增）：get_account_profile / get_account_models
+#   - src-tauri/src/services/mod.rs（锚点）：pub mod account;
+#   - src-tauri/src/commands/mod.rs（锚点）：mod account; + pub use account::*;
+#   - src-tauri/src/lib.rs（锚点）：invoke_handler 注册 2 个命令
+#
+# 为什么走 Rust 后端：cc-switch 前端是 Tauri WebView，fetch 受 CORS 约束；new-api 站点
+#   通常不放客户端 CORS 头。故照 balance.rs 成例，用 proxy::http_client::get() 在 Rust 侧
+#   直发 HTTPS 绕开 WebView CORS。前端只调 command，不直接 fetch。
+# 接口对齐（与 open-code cx-account-api.ts 逐一对应）：
+#   - profile 路径 /api/app/profile（站点根下），Bearer sk- 鉴权；
+#   - models 路径 /v1/models（OpenAI 兼容）；
+#   - 站点根推导 deriveApiBase：去尾 / 再去尾 /v1；
+#   - 字段区分 account_* / key_* / *_tokens_* 三类，旧版二开字段做兼容兜底；
+#   - QUOTA_PER_UNIT 换算不在后端做，额度原值透传前端（对齐 open-code：换算在渲染层）。
+# 错误语义（对齐 balance.rs / coding_plan / subscription）：
+#   - Err(String) = 瞬时传输失败（网络/超时/读体中断）→ 前端 reject → react-query retry；
+#   - Ok(ok:false) = 确定性失败（空凭据/鉴权/非 2xx/响应体非法）→ 立即透出。
+#
+# 依赖：独立新增文件 + 3 处最小锚点，不与其它补丁共享文件（锚点行与上游高频改动隔离）。
+# 应用（在 upstream/ 内，基线为 brand/BASE_SHA）：
+#   git -C upstream apply brand/patches/02-account-profile-backend.patch
+diff --git a/src-tauri/src/commands/account.rs b/src-tauri/src/commands/account.rs
+new file mode 100644
+index 00000000..0bc26174
+--- /dev/null
++++ b/src-tauri/src/commands/account.rs
+@@ -0,0 +1,27 @@
++//! [ccs] new-api 账户体系命令层
++//!
++//! 暴露给前端的账户只读接口，全部委托 `services::account`（用 Rust 侧 http_client 直发，
++//! 绕开 Tauri WebView 的 CORS）。命令签名范式对齐 commands/balance.rs 的 get_balance。
++
++use crate::services::account::{self, AccountProfileResult};
++
++/// [ccs] 拉取账户 profile（余额/用量/当前 key 元数据）。凭据由前端传入（逐 key 查询）。
++/// 瞬时传输失败 `Err`（前端 reject → react-query retry + 保留上次成功值）；
++/// 确定性失败走 `Ok(AccountProfileResult{ok:false,error})`。
++#[tauri::command]
++pub async fn get_account_profile(
++    base_url: String,
++    api_key: String,
++) -> Result<AccountProfileResult, String> {
++    account::fetch_profile(&base_url, &api_key).await
++}
++
++/// [ccs] 拉取某 key 的可用模型 id 列表（OpenAI 兼容 /v1/models）。脏响应/非 2xx 返回空 Vec；
++/// 仅读体中断视为瞬时 `Err`。
++#[tauri::command]
++pub async fn get_account_models(
++    base_url: String,
++    api_key: String,
++) -> Result<Vec<String>, String> {
++    account::fetch_models(&base_url, &api_key).await
++}
+diff --git a/src-tauri/src/commands/mod.rs b/src-tauri/src/commands/mod.rs
+index 29a26710..add630db 100644
+--- a/src-tauri/src/commands/mod.rs
++++ b/src-tauri/src/commands/mod.rs
+@@ -1,5 +1,6 @@
+ #![allow(non_snake_case)]
+ 
++mod account;
+ mod auth;
+ mod balance;
+ mod codex_oauth;
+@@ -35,6 +36,7 @@ mod usage;
+ mod webdav_sync;
+ mod workspace;
+ 
++pub use account::*;
+ pub use auth::*;
+ pub use balance::*;
+ pub use codex_oauth::*;
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index b2b214c1..f56f82ca 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -1259,6 +1259,9 @@ pub fn run() {
+             commands::get_codex_oauth_models,
+             commands::get_coding_plan_quota,
+             commands::get_balance,
++            // [ccs] new-api 账户接口
++            commands::get_account_profile,
++            commands::get_account_models,
+             // New MCP via config.json (SSOT)
+             commands::get_mcp_config,
+             commands::upsert_mcp_server_in_config,
+diff --git a/src-tauri/src/services/account.rs b/src-tauri/src/services/account.rs
+new file mode 100644
+index 00000000..df0cf2d4
+--- /dev/null
++++ b/src-tauri/src/services/account.rs
+@@ -0,0 +1,379 @@
++//! [ccs] new-api 账户体系服务层
++//!
++//! 对接自建 new-api 后端的只读账户接口，供「账户面板 + 一键导入 key」使用。
++//! 接口方式与 open-code 那套（brand 定制层的 cx-account-api.ts）**完全一致**，
++//! 逐一对齐：
++//!   - profile 接口路径 `/api/app/profile`（站点根下，非 /v1 渠道端点），`Bearer sk-` 鉴权；
++//!   - models 接口 `/v1/models`（OpenAI 兼容），`Bearer sk-`；
++//!   - 站点根推导：渠道 baseURL 去尾 `/` 再去尾 `/v1`；
++//!   - 字段严格区分 account_* / key_* / *_tokens_* 三类语义（见 ProfilePayload）；
++//!   - 旧版二开字段（quota/used_quota/token_* 等）做兼容兜底。
++//!
++//! 为什么走 Rust 后端而非前端直接 fetch：cc-switch 前端是 Tauri WebView，fetch 受
++//! CORS 约束；new-api 站点通常不对客户端 origin 放 CORS 头。故照 balance.rs 的成例，
++//! 用 `proxy::http_client::get()` 在 Rust 侧直发 HTTPS，绕开 WebView CORS。
++//!
++//! 错误通道语义（与 balance.rs / coding_plan / subscription 一致）：
++//!   - `Err(String)` = 瞬时传输失败（网络不可达/超时/读体中断）→ 前端 reject → react-query
++//!     retry 并保留上次成功值；
++//!   - `Ok(结构化错误)` = 确定性失败（空凭据/鉴权/非 2xx/响应体非法 JSON）→ 立即透出。
++//!
++//! QUOTA_PER_UNIT（额度→美元换算）不在此做：额度原值原样透传给前端，换算/展示在前端
++//! format.ts（对齐 open-code：换算在渲染层）。
++
++use serde::{Deserialize, Serialize};
++use std::time::Duration;
++
++// [ccs] new-api 只读 profile 接口路径（站点根下）。与 open-code APP_PROFILE_PATH 一致。
++const APP_PROFILE_PATH: &str = "/api/app/profile";
++
++// ── 站点根 / models 端点推导（与 open-code deriveApiBase / deriveModelsUrl 逐字对齐）──
++
++/// 从渠道 baseURL（如 `https://host/v1`）推导 new-api 站点根（`https://host`）。
++/// 用户接口挂站点根 `/api` 下，渠道端点挂 `/v1` 下。
++fn derive_api_base(base_url: &str) -> String {
++    let trimmed = base_url.trim().trim_end_matches('/');
++    trimmed.strip_suffix("/v1").unwrap_or(trimmed).to_string()
++}
++
++/// 由渠道 baseURL 推导 OpenAI 兼容 `/v1/models` 端点。
++/// 已以 `/v1` 结尾 → `<base>/models`，否则 → `<base>/v1/models`。
++fn derive_models_url(base_url: &str) -> String {
++    let trimmed = base_url.trim().trim_end_matches('/');
++    if trimmed.ends_with("/v1") {
++        format!("{trimmed}/models")
++    } else {
++        format!("{trimmed}/v1/models")
++    }
++}
++
++// ── 响应契约 ────────────────────────────────────────────────
++
++/// [ccs] `/api/app/profile` 响应信封（对齐 open-code ProfilePayload）。字段全部可选，
++/// 做防御性解析；契约未强约束 success 信封，故按 HTTP status 分支，data 缺失时把整个
++/// body 当扁平 profile 兜底。
++#[derive(Debug, Default, Deserialize)]
++struct ProfilePayload {
++    username: Option<String>,
++    display_name: Option<String>,
++    avatar: Option<String>,
++    account_remaining_quota: Option<f64>,
++    account_used_quota: Option<f64>,
++    account_total_quota: Option<f64>,
++    account_quota_used_today: Option<f64>,
++    account_tokens_used_today: Option<f64>,
++    account_prompt_tokens_today: Option<f64>,
++    account_completion_tokens_today: Option<f64>,
++    key_name: Option<String>,
++    key_remaining_quota: Option<f64>,
++    key_used_quota: Option<f64>,
++    key_quota_used_today: Option<f64>,
++    key_tokens_used_today: Option<f64>,
++    key_prompt_tokens_today: Option<f64>,
++    key_completion_tokens_today: Option<f64>,
++    key_unlimited_quota: Option<bool>,
++    key_group: Option<String>,
++    key_dynamic_ratio: Option<bool>,
++    key_status: Option<i64>,
++    key_expires_at: Option<i64>,
++    key_model_limits_enabled: Option<bool>,
++    key_model_limits: Option<Vec<String>>,
++    request_count_today: Option<f64>,
++    // 旧版二开字段兼容：新后端应优先返回上面的 account_* / key_* 明确命名。
++    quota: Option<f64>,
++    used_quota: Option<f64>,
++    used_today: Option<f64>,
++    token_name: Option<String>,
++    token_remain: Option<f64>,
++    token_used: Option<f64>,
++    token_used_today: Option<f64>,
++    unlimited: Option<bool>,
++}
++
++/// success 信封包裹（部分二开返回 `{success, message, data}`，部分直接扁平返回）。
++#[derive(Debug, Default, Deserialize)]
++struct ProfileResponse {
++    success: Option<bool>,
++    message: Option<String>,
++    data: Option<ProfilePayload>,
++    #[serde(flatten)]
++    flat: ProfilePayload,
++}
++
++/// [ccs] 账户 profile 就绪态（透传给前端；额度原值，换算在前端）。字段命名 camelCase
++/// 对齐 open-code ProfileData，前端 account.ts 的 AccountProfile 与此 1:1。
++#[derive(Debug, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct AccountProfile {
++    pub username: String,
++    pub display_name: String,
++    pub avatar: String,
++    pub account_remaining_quota: f64,
++    pub account_used_quota: f64,
++    pub account_total_quota: f64,
++    pub account_quota_used_today: Option<f64>,
++    pub account_tokens_used_today: Option<f64>,
++    pub account_prompt_tokens_today: Option<f64>,
++    pub account_completion_tokens_today: Option<f64>,
++    pub key_remaining_quota: f64,
++    pub key_used_quota: f64,
++    pub key_quota_used_today: Option<f64>,
++    pub key_tokens_used_today: Option<f64>,
++    pub key_prompt_tokens_today: Option<f64>,
++    pub key_completion_tokens_today: Option<f64>,
++    pub key_unlimited_quota: bool,
++    pub key_group: String,
++    pub key_dynamic_ratio: bool,
++    pub key_status: i64,
++    pub key_expires_at: i64,
++    pub key_model_limits_enabled: bool,
++    pub key_model_limits: Vec<String>,
++    pub request_count_today: Option<f64>,
++    pub token_name: String,
++}
++
++impl AccountProfile {
++    /// 把防御性解析出的 payload 折叠成就绪态（对齐 open-code fetchProfileWith 的字段兜底）。
++    fn from_payload(p: ProfilePayload) -> Self {
++        let account_used_quota = p.account_used_quota.or(p.used_quota).unwrap_or(0.0);
++        let account_total_quota = p.account_total_quota.or(p.quota).unwrap_or(0.0);
++        let account_remaining_quota = p
++            .account_remaining_quota
++            .unwrap_or_else(|| (account_total_quota - account_used_quota).max(0.0));
++        let account_total_quota = if account_total_quota > 0.0 {
++            account_total_quota
++        } else {
++            account_remaining_quota + account_used_quota
++        };
++
++        AccountProfile {
++            username: p.username.unwrap_or_default(),
++            display_name: p.display_name.unwrap_or_default(),
++            avatar: p.avatar.unwrap_or_default(),
++            account_remaining_quota,
++            account_used_quota,
++            account_total_quota,
++            account_quota_used_today: p.account_quota_used_today.or(p.used_today),
++            account_tokens_used_today: p.account_tokens_used_today,
++            account_prompt_tokens_today: p.account_prompt_tokens_today,
++            account_completion_tokens_today: p.account_completion_tokens_today,
++            key_remaining_quota: p.key_remaining_quota.or(p.token_remain).unwrap_or(0.0),
++            key_used_quota: p.key_used_quota.or(p.token_used).unwrap_or(0.0),
++            key_quota_used_today: p.key_quota_used_today.or(p.token_used_today),
++            key_tokens_used_today: p.key_tokens_used_today,
++            key_prompt_tokens_today: p.key_prompt_tokens_today,
++            key_completion_tokens_today: p.key_completion_tokens_today,
++            key_unlimited_quota: p.key_unlimited_quota.or(p.unlimited).unwrap_or(false),
++            key_group: p.key_group.unwrap_or_default(),
++            key_dynamic_ratio: p.key_dynamic_ratio.unwrap_or(false),
++            // 状态默认「启用」(1)，过期时间默认 0（永不过期）——旧后端不返回时不误报异常态。
++            key_status: p.key_status.unwrap_or(1),
++            key_expires_at: p.key_expires_at.unwrap_or(0),
++            key_model_limits_enabled: p.key_model_limits_enabled.unwrap_or(false),
++            key_model_limits: p.key_model_limits.unwrap_or_default(),
++            request_count_today: p.request_count_today,
++            token_name: p.key_name.or(p.token_name).unwrap_or_default(),
++        }
++    }
++}
++
++/// [ccs] profile 查询结果。确定性失败走 `ok:false + error`，就绪走 `ok:true + profile`。
++/// 瞬时失败不在此体现（走外层 `Err`）。
++#[derive(Debug, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct AccountProfileResult {
++    pub ok: bool,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub profile: Option<AccountProfile>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub error: Option<String>,
++}
++
++fn profile_ok(profile: AccountProfile) -> AccountProfileResult {
++    AccountProfileResult {
++        ok: true,
++        profile: Some(profile),
++        error: None,
++    }
++}
++
++fn profile_err(msg: impl Into<String>) -> AccountProfileResult {
++    AccountProfileResult {
++        ok: false,
++        profile: None,
++        error: Some(msg.into()),
++    }
++}
++
++// ── 公开入口 ────────────────────────────────────────────────
++
++/// [ccs] 拉取账户 profile（对齐 open-code fetchProfileWith）。凭据由参数传入（逐 key 查询，
++/// 不同 key 可能属不同账户）。瞬时失败 `Err`（前端 retry），确定性失败 `Ok(ok:false)`。
++pub async fn fetch_profile(
++    base_url: &str,
++    api_key: &str,
++) -> Result<AccountProfileResult, String> {
++    if base_url.trim().is_empty() || api_key.trim().is_empty() {
++        return Ok(profile_err("缺少渠道凭据"));
++    }
++
++    let url = format!("{}{}", derive_api_base(base_url), APP_PROFILE_PATH);
++    let client = crate::proxy::http_client::get();
++
++    let resp = client
++        .get(&url)
++        .header("Authorization", format!("Bearer {api_key}"))
++        .header("Accept", "application/json")
++        .timeout(Duration::from_secs(15))
++        .send()
++        .await;
++
++    let resp = match resp {
++        Ok(r) => r,
++        Err(e) => return Err(format!("Network error: {e}")),
++    };
++
++    let status = resp.status();
++    if !status.is_success() {
++        return Ok(profile_err(format!("请求返回 HTTP {status}")));
++    }
++
++    // 先 bytes() 再解析：读体失败是瞬时 → Err；拿到完整响应体后解析失败才是确定性。
++    let raw = match resp.bytes().await {
++        Ok(b) => b,
++        Err(e) => return Err(format!("Failed to read response: {e}")),
++    };
++    let body: ProfileResponse = match serde_json::from_slice(&raw) {
++        Ok(v) => v,
++        Err(e) => return Ok(profile_err(format!("Failed to parse response: {e}"))),
++    };
++
++    if body.success == Some(false) {
++        return Ok(profile_err(
++            body.message.unwrap_or_else(|| "接口返回失败".to_string()),
++        ));
++    }
++
++    // data 存在则用 data，否则整个 body（扁平）当 profile 兜底。
++    let payload = body.data.unwrap_or(body.flat);
++    Ok(profile_ok(AccountProfile::from_payload(payload)))
++}
++
++/// [ccs] 拉取某 key 的可用模型 id 列表（对齐 open-code fetchModelsWith）。
++/// 任何异常/非 2xx/脏响应都返回空 Vec；仅读体中断视为瞬时 `Err`。去重。
++pub async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<String>, String> {
++    if base_url.trim().is_empty() || api_key.trim().is_empty() {
++        return Ok(Vec::new());
++    }
++
++    let url = derive_models_url(base_url);
++    let client = crate::proxy::http_client::get();
++
++    let resp = client
++        .get(&url)
++        .header("Authorization", format!("Bearer {api_key}"))
++        .header("Accept", "application/json")
++        .timeout(Duration::from_secs(15))
++        .send()
++        .await;
++
++    let resp = match resp {
++        Ok(r) => r,
++        Err(e) => return Err(format!("Network error: {e}")),
++    };
++
++    if !resp.status().is_success() {
++        return Ok(Vec::new());
++    }
++
++    let raw = match resp.bytes().await {
++        Ok(b) => b,
++        Err(e) => return Err(format!("Failed to read response: {e}")),
++    };
++    let body: serde_json::Value = match serde_json::from_slice(&raw) {
++        Ok(v) => v,
++        Err(_) => return Ok(Vec::new()),
++    };
++
++    // 兼容 `{data:[...]}` 与顶层数组 `[...]`；每项取 id（字符串或 {id}）。
++    let list = if let Some(arr) = body.get("data").and_then(|v| v.as_array()) {
++        arr.clone()
++    } else if let Some(arr) = body.as_array() {
++        arr.clone()
++    } else {
++        Vec::new()
++    };
++
++    let mut seen = std::collections::HashSet::new();
++    let mut ids = Vec::new();
++    for item in list {
++        let id = if let Some(s) = item.as_str() {
++            Some(s.to_string())
++        } else {
++            item.get("id").and_then(|v| v.as_str()).map(String::from)
++        };
++        if let Some(id) = id {
++            if !id.is_empty() && seen.insert(id.clone()) {
++                ids.push(id);
++            }
++        }
++    }
++    Ok(ids)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn derive_api_base_strips_v1_and_slash() {
++        assert_eq!(derive_api_base("https://host/v1"), "https://host");
++        assert_eq!(derive_api_base("https://host/v1/"), "https://host");
++        assert_eq!(derive_api_base("https://host/"), "https://host");
++        assert_eq!(derive_api_base("https://host"), "https://host");
++    }
++
++    #[test]
++    fn derive_models_url_appends_correctly() {
++        assert_eq!(derive_models_url("https://host/v1"), "https://host/v1/models");
++        assert_eq!(derive_models_url("https://host"), "https://host/v1/models");
++        assert_eq!(
++            derive_models_url("https://host/v1/"),
++            "https://host/v1/models"
++        );
++    }
++
++    #[test]
++    fn payload_fold_prefers_account_fields_over_legacy() {
++        let p = ProfilePayload {
++            account_used_quota: Some(100.0),
++            account_total_quota: Some(500.0),
++            used_quota: Some(999.0), // 旧字段应被忽略
++            quota: Some(999.0),
++            ..Default::default()
++        };
++        let profile = AccountProfile::from_payload(p);
++        assert_eq!(profile.account_used_quota, 100.0);
++        assert_eq!(profile.account_total_quota, 500.0);
++        assert_eq!(profile.account_remaining_quota, 400.0);
++    }
++
++    #[test]
++    fn payload_fold_falls_back_to_legacy_fields() {
++        let p = ProfilePayload {
++            used_quota: Some(30.0),
++            quota: Some(100.0),
++            token_remain: Some(70.0),
++            unlimited: Some(true),
++            token_name: Some("legacy-key".to_string()),
++            ..Default::default()
++        };
++        let profile = AccountProfile::from_payload(p);
++        assert_eq!(profile.account_used_quota, 30.0);
++        assert_eq!(profile.account_total_quota, 100.0);
++        assert_eq!(profile.key_remaining_quota, 70.0);
++        assert!(profile.key_unlimited_quota);
++        assert_eq!(profile.token_name, "legacy-key");
++        assert_eq!(profile.key_status, 1); // 默认启用
++    }
++}
+diff --git a/src-tauri/src/services/mod.rs b/src-tauri/src/services/mod.rs
+index 838c93b5..5f24ec64 100644
+--- a/src-tauri/src/services/mod.rs
++++ b/src-tauri/src/services/mod.rs
+@@ -1,3 +1,4 @@
++pub mod account;
+ pub mod balance;
+ pub mod codex_oauth_models;
+ pub mod coding_plan;
