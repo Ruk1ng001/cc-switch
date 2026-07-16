@@ -1,0 +1,144 @@
+# 07-tray-account-entry —— 托盘菜单加「我的账户」快捷入口
+#
+# 职责：在系统托盘菜单顶部（「打开主界面」后、「打开官方网站」前）加一项「我的账户」，
+#       点击后弹出主窗口并直接打开账户面板（余额/用量/一键铺开各 CLI）。
+#
+# 为什么需要：cc-switch 是常驻托盘工具，窗口大量时间收起。原本查余额/切 key 需先「打开
+#       主界面」再点顶栏账户图标（补丁 04），多一步。托盘直达账户面板贴合「随手弹开」的使用模型。
+#
+# 改动文件：
+#   - src-tauri/src/tray.rs（改）：TrayTexts 加 account 字段（+4 语言文案）；菜单顶部加
+#     account_item；handle_tray_menu_event 加 "open_account" 分支——复用 show_main 的窗口
+#     显示逻辑（各平台）弹出主窗口后 emit("ccs-open-account") 通知前端。
+#   - src/App.tsx（改）：加 useEffect 监听 "ccs-open-account" → setAccountPanelOpen(true)。
+#     用动态 import("@tauri-apps/api/event") 拿 listen，不碰 import 块（与补丁 04 零重叠）；
+#     带 active 守卫防 async import 期间卸载的竞态。
+#
+# 依赖：04（accountPanelOpen 状态 + AccountPanel）。tray.rs 与其它补丁不共享文件。
+# 应用（在 upstream/ 内，基线为 brand/BASE_SHA）：
+#   git -C upstream apply brand/patches/07-tray-account-entry.patch
+diff --git a/src-tauri/src/tray.rs b/src-tauri/src/tray.rs
+index 95efbb87..40b4a0d2 100644
+--- a/src-tauri/src/tray.rs
++++ b/src-tauri/src/tray.rs
+@@ -50,6 +50,7 @@ static TRAY_SECTION_SUBMENUS: Lazy<
+ pub struct TrayTexts {
+     pub show_main: &'static str,
+     pub open_website: &'static str,
++    pub account: &'static str,
+     pub no_providers_label: &'static str,
+     pub lightweight_mode: &'static str,
+     pub quit: &'static str,
+@@ -64,6 +65,7 @@ impl TrayTexts {
+             "en" => Self {
+                 show_main: "Open main window",
+                 open_website: "Open Official Website",
++                account: "My Account",
+                 no_providers_label: "(no providers)",
+                 lightweight_mode: "Lightweight Mode",
+                 quit: "Quit",
+@@ -74,6 +76,7 @@ impl TrayTexts {
+             "ja" => Self {
+                 show_main: "メインウィンドウを開く",
+                 open_website: "公式サイトを開く",
++                account: "マイアカウント",
+                 no_providers_label: "(プロバイダーなし)",
+                 lightweight_mode: "軽量モード",
+                 quit: "終了",
+@@ -84,6 +87,7 @@ impl TrayTexts {
+             "zh-TW" => Self {
+                 show_main: "開啟主介面",
+                 open_website: "開啟官方網站",
++                account: "我的帳戶",
+                 no_providers_label: "(無供應商)",
+                 lightweight_mode: "輕量模式",
+                 quit: "退出",
+@@ -94,6 +98,7 @@ impl TrayTexts {
+             _ => Self {
+                 show_main: "打开主界面",
+                 open_website: "打开官方网站",
++                account: "我的账户",
+                 no_providers_label: "(无供应商)",
+                 lightweight_mode: "轻量模式",
+                 quit: "退出",
+@@ -618,8 +623,13 @@ pub fn create_tray_menu(
+         None::<&str>,
+     )
+     .map_err(|e| AppError::Message(format!("创建打开官方网站菜单失败: {e}")))?;
++    // [ccs] 我的账户：弹出主窗口并打开账户面板（余额/用量/一键铺开）。
++    let account_item =
++        MenuItem::with_id(app, "open_account", tray_texts.account, true, None::<&str>)
++            .map_err(|e| AppError::Message(format!("创建我的账户菜单失败: {e}")))?;
+     menu_builder = menu_builder
+         .item(&show_main_item)
++        .item(&account_item)
+         .item(&open_website_item)
+         .separator();
+ 
+@@ -918,6 +928,34 @@ pub fn handle_tray_menu_event(app: &tauri::AppHandle, event_id: &str) {
+                 }
+             }
+         }
++        // [ccs] 我的账户：先复用 show_main 的窗口显示逻辑弹出主窗口，再发事件让前端打开账户面板。
++        "open_account" => {
++            if let Some(window) = app.get_webview_window("main") {
++                #[cfg(target_os = "windows")]
++                {
++                    let _ = window.set_skip_taskbar(false);
++                }
++                let _ = window.unminimize();
++                let _ = window.show();
++                let _ = window.set_focus();
++                #[cfg(target_os = "linux")]
++                {
++                    crate::linux_fix::nudge_main_window(window.clone());
++                }
++                #[cfg(target_os = "macos")]
++                {
++                    apply_tray_policy(app, true);
++                }
++            } else if crate::lightweight::is_lightweight_mode() {
++                if let Err(e) = crate::lightweight::exit_lightweight_mode(app) {
++                    log::error!("退出轻量模式重建窗口失败: {e}");
++                }
++            }
++            // 窗口就绪后通知前端切到账户面板。前端 App.tsx 监听 "ccs-open-account"。
++            if let Err(e) = app.emit("ccs-open-account", ()) {
++                log::error!("发送打开账户面板事件失败: {e}");
++            }
++        }
+         "open_website" => {
+             if let Err(e) = app.opener().open_url("https://ccswitch.io", None::<String>) {
+                 log::error!("打开官方网站失败: {e}");
+diff --git a/src/App.tsx b/src/App.tsx
+index feae4056..c1c14b68 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -452,6 +452,27 @@ function App() {
+     },
+   );
+ 
++  // [ccs] 监听托盘「我的账户」事件：托盘点击后 Rust 侧已弹出主窗口并 emit，此处打开账户面板。
++  useEffect(() => {
++    let unlisten: (() => void) | undefined;
++    let active = true;
++    void (async () => {
++      const { listen } = await import("@tauri-apps/api/event");
++      const un = await listen("ccs-open-account", () => {
++        setAccountPanelOpen(true);
++      });
++      if (active) {
++        unlisten = un;
++      } else {
++        un();
++      }
++    })();
++    return () => {
++      active = false;
++      unlisten?.();
++    };
++  }, []);
++
+   useEffect(() => {
+     let active = true;
+     let unlistenResize: (() => void) | undefined;
