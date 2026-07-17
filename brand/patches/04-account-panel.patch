@@ -22,7 +22,7 @@
 # 应用（在 upstream/ 内，基线为 brand/BASE_SHA）：
 #   git -C upstream apply brand/patches/04-account-panel.patch
 diff --git a/src/App.tsx b/src/App.tsx
-index 645f1002..7c5c29f5 100644
+index 645f1002..a81343f3 100644
 --- a/src/App.tsx
 +++ b/src/App.tsx
 @@ -25,6 +25,7 @@ import {
@@ -49,16 +49,17 @@ index 645f1002..7c5c29f5 100644
  import { McpIcon } from "@/components/BrandIcons";
  import { Button } from "@/components/ui/button";
  import { SessionManagerPage } from "@/components/sessions/SessionManagerPage";
-@@ -174,6 +184,8 @@ function App() {
+@@ -174,6 +184,9 @@ function App() {
    const sharedFeatureApp: AppId =
      activeApp === "claude-desktop" ? "claude" : activeApp;
    const [currentView, setCurrentView] = useState<View>(getInitialView);
 +  // [ccs] 账户面板开关。用 Dialog 承载，不进 View 状态机——最小侵入，随官方升级不冲突。
-+  const [accountPanelOpen, setAccountPanelOpen] = useState(false);
++  // 初始 true：每次启动即弹出账户面板（品牌层要求，用户开箱先见「我的账户」）。
++  const [accountPanelOpen, setAccountPanelOpen] = useState(true);
    const [skillsDiscoverySource, setSkillsDiscoverySource] =
      useState<SkillsPageSource>("repos");
    const [settingsDefaultTab, setSettingsDefaultTab] = useState("general");
-@@ -1215,6 +1227,16 @@ function App() {
+@@ -1215,6 +1228,16 @@ function App() {
                  >
                    <Settings className="w-4 h-4" />
                  </Button>
@@ -75,7 +76,7 @@ index 645f1002..7c5c29f5 100644
                  <UpdateBadge
                    onClick={() => {
                      setSettingsDefaultTab("about");
-@@ -1659,6 +1681,23 @@ function App() {
+@@ -1659,6 +1682,23 @@ function App() {
  
        <DeepLinkImportDialog />
        <FirstRunNoticeDialog />
@@ -101,10 +102,10 @@ index 645f1002..7c5c29f5 100644
  }
 diff --git a/src/components/account/AccountPanel.tsx b/src/components/account/AccountPanel.tsx
 new file mode 100644
-index 00000000..7e5c32cd
+index 00000000..d3b2eda7
 --- /dev/null
 +++ b/src/components/account/AccountPanel.tsx
-@@ -0,0 +1,226 @@
+@@ -0,0 +1,219 @@
 +// [ccs] 账户面板容器。
 +//
 +// 列出所有 providerType:"newapi" 的 UniversalProvider（= 一个个 new-api key），逐个渲染 KeyCard
@@ -128,6 +129,12 @@ index 00000000..7e5c32cd
 +import { KeyCard } from "./KeyCard";
 +import { bindAccount, reapplyProvider } from "./importKey";
 +
++// [ccs] 内置 new-api 站点根：写死为本项目自建网关，用户绑定时无需（也无法）填接口地址。
++// 该值会同时用于 (1) 铺开到各 CLI 的 ANTHROPIC_BASE_URL（原样写入，new-api 在站点根挂
++// Anthropic 兼容端点）；(2) 查余额（后端 derive_api_base 从此推导 /api/app/profile）。
++// 换网关只改这一处常量即可。
++export const BUILTIN_NEWAPI_BASE_URL = "https://dokng.com";
++
 +export function AccountPanel() {
 +  const { t } = useTranslation();
 +
@@ -136,8 +143,7 @@ index 00000000..7e5c32cd
 +  // 正在「重新铺开」的渠道 id（禁用对应卡片按钮）。
 +  const [reapplyingId, setReapplyingId] = useState<string | null>(null);
 +
-+  // 绑定表单
-+  const [baseUrl, setBaseUrl] = useState("");
++  // 绑定表单（接口地址内置为 BUILTIN_NEWAPI_BASE_URL，不暴露给用户）
 +  const [apiKey, setApiKey] = useState("");
 +  const [name, setName] = useState("");
 +  const [binding, setBinding] = useState(false);
@@ -171,21 +177,21 @@ index 00000000..7e5c32cd
 +    });
 +
 +  const handleBind = useCallback(async () => {
-+    if (!baseUrl.trim() || !apiKey.trim()) {
++    if (!apiKey.trim()) {
 +      toast.error(
 +        t("account.bindMissing", {
-+          defaultValue: "请填写接口地址和 API Key",
++          defaultValue: "请填写 API Key",
 +        }),
 +      );
 +      return;
 +    }
 +    try {
 +      setBinding(true);
-+      await bindAccount({ baseUrl, apiKey, name });
++      // [ccs] 接口地址内置，不由用户填写。
++      await bindAccount({ baseUrl: BUILTIN_NEWAPI_BASE_URL, apiKey, name });
 +      toast.success(
 +        t("account.bindSuccess", { defaultValue: "已绑定并铺开到各 CLI" }),
 +      );
-+      setBaseUrl("");
 +      setApiKey("");
 +      setName("");
 +      await load();
@@ -200,7 +206,7 @@ index 00000000..7e5c32cd
 +    } finally {
 +      setBinding(false);
 +    }
-+  }, [baseUrl, apiKey, name, load, t]);
++  }, [apiKey, name, load, t]);
 +
 +  const handleReapply = useCallback(
 +    async (provider: UniversalProvider) => {
@@ -237,19 +243,7 @@ index 00000000..7e5c32cd
 +            </span>
 +          </div>
 +          <div className="grid gap-3 sm:grid-cols-2">
-+            <div className="space-y-1">
-+              <Label htmlFor="ccs-account-baseurl">
-+                {t("account.baseUrl", { defaultValue: "接口地址" })}
-+              </Label>
-+              <Input
-+                id="ccs-account-baseurl"
-+                value={baseUrl}
-+                onChange={(e) => setBaseUrl(e.target.value)}
-+                placeholder="https://your-newapi.example.com"
-+                disabled={binding}
-+              />
-+            </div>
-+            <div className="space-y-1">
++            <div className="space-y-1 sm:col-span-2">
 +              <Label htmlFor="ccs-account-name">
 +                {t("account.displayName", { defaultValue: "展示名（可选）" })}
 +              </Label>
