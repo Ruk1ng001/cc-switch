@@ -57,6 +57,7 @@ jobs:
     runs-on: ubuntu-22.04
     outputs:
       version: ${{ steps.resolve.outputs.version }}
+      app_version: ${{ steps.resolve.outputs.app_version }}
     steps:
       - name: Checkout（含全部 tag，供 next-version.sh 计算）
         uses: actions/checkout@v4
@@ -93,6 +94,15 @@ jobs:
             echo "已建 tag 并推送：$version"
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          # app 内嵌版本 / latest.json 版本：把品牌预发布号 -ccs.N 转成纯数字 -N。
+          # 原因：Windows MSI（WiX）要求 semver 预发布号纯数字（映射到 ProductVersion
+          # 第 4 段，≤65535），"ccs" 含字母会让 msi 打包报错。tag 保留 -ccs.N 作品牌标识，
+          # 但 app/latest.json 必须一致地用纯数字，否则 updater 版本比对错乱。
+          # 形如 v3.17.0-ccs.4 → 3.17.0-4（剥前导 v、-ccs. 换 -）；无 -ccs. 的 tag 原样剥 v。
+          app_version="${version#v}"
+          app_version="${app_version/-ccs./-}"
+          echo "app_version=$app_version" >> "$GITHUB_OUTPUT"
+          echo "app 内嵌版本：$app_version"
 
   build:
     name: 构建（${{ matrix.label }}）
@@ -134,14 +144,14 @@ jobs:
       - name: 注入定制版本号到 tauri.conf.json
         shell: bash
         env:
-          TAG: ${{ needs.resolve.outputs.version }}
+          VERSION: ${{ needs.resolve.outputs.app_version }}
         run: |
           set -euo pipefail
           # 关键：app 内嵌版本必须等于 latest.json 的 version，updater 才能正确比对。
-          # tag 形如 v3.17.0-ccs.1 → 版本号 3.17.0-ccs.1（剥掉前导 v）。
-          # 若不改，app 内嵌版本仍是上游 3.17.0，而 latest.json 写 3.17.0-ccs.1（semver 预发布号
+          # 用 resolve 算好的 app_version（纯数字预发布号，如 3.17.0-4）——不能带 -ccs.，
+          # 否则 Windows MSI 打包报「pre-release identifier must be numeric-only」。
+          # 若不改，app 内嵌版本仍是上游 3.17.0，而 latest.json 写 3.17.0-4（semver 预发布号
           # 反而 < 3.17.0）→ updater 永远判定「无更新」→ 自更新彻底失效。
-          VERSION="${TAG#v}"
           CONF="upstream/src-tauri/tauri.conf.json"
           VERSION="$VERSION" python3 - "$CONF" <<'PY'
           import json, os, sys
@@ -166,12 +176,24 @@ jobs:
           version: 9
 
       - name: 安装 Rust
-        # 关键：channel 必须匹配 upstream/rust-toolchain.toml（锁 1.95），否则 rustup 在
-        # upstream/ 内遵从该文件用 1.95 编译，而 target 却装在 stable 工具链上 → macOS
-        # universal 构建报 "Target x86_64-apple-darwin is not installed"。
+        # channel 匹配 upstream/rust-toolchain.toml（锁 1.95）。注意：action 的 targets
+        # 输入把 target 装到 action 自己解析的工具链名下，未必等于 upstream/ 内
+        # rust-toolchain.toml override 解析出的那个 → 故 macOS 的双 target 改由下一步
+        # 在 upstream/ 目录里显式 rustup target add 落地（确定性）。
         uses: dtolnay/rust-toolchain@1.95
-        with:
-          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: macOS 双 target 装到 upstream 锁定的工具链上
+        if: runner.os == 'macOS'
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # 在 upstream/ 内跑：rustup 遵从此目录 rust-toolchain.toml 的 override，
+          # 把 universal 所需两个 target 加到「tauri build 真正使用」的那个工具链上，
+          # 从根上消除 "Target x86_64-apple-darwin is not installed"。
+          rustup show active-toolchain
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          rustup target list --installed
 
       - name: 安装 Linux 系统依赖
         if: runner.os == 'Linux'
@@ -367,9 +389,12 @@ jobs:
         shell: bash
         env:
           TAG: ${{ needs.resolve.outputs.version }}
+          APP_VERSION: ${{ needs.resolve.outputs.app_version }}
         run: |
           set -euo pipefail
-          VERSION="${TAG#v}"
+          # version 字段必须等于 app 内嵌版本（app_version，纯数字预发布号），updater 才能正确比对。
+          # notes 保留原始 tag（含 -ccs.N 品牌标识）。
+          VERSION="$APP_VERSION"
           PUB_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           base_url="https://dl.dokng.com/cc-switch"
           mac_url=""; mac_sig=""
