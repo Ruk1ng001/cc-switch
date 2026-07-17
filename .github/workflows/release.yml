@@ -19,7 +19,10 @@ name: release
 #   缺失则产物无 .sig、客户端验签失败、自更新废掉——故设为硬失败。
 #
 # 触发：push tag v*（auto-upgrade 每日升级后会打 vX.Y.Z-ccs.N 并推送，即触发本流水线）；
-#   workflow_dispatch 手动触发（需手填 tag，用于补发）。
+#   workflow_dispatch 手动触发：
+#     - tag 留空（推荐）→ resolve job 用 next-version.sh 自动算下一个 vX.Y.Z-ccs.N，
+#       建 tag 并推送（下游 build/publish 用这个版本）；
+#     - tag 填已存在的版本 → 补发那一版（不新建 tag）。
 #
 # 需要的 Secret：
 #   TAURI_SIGNING_PRIVATE_KEY          minisign 私钥（两行原文 / base64 / 一行 base64 均可）
@@ -34,19 +37,66 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "要出包的 tag（如 v3.17.0-ccs.1，须已存在）"
-        required: true
+        description: "要出包的 tag（留空则自动算下一个 vX.Y.Z-ccs.N；填已存在的 tag 则补发那一版）"
+        required: false
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
+  # 统一解析出包版本号，作为下游所有 job 的唯一来源（避免各步骤各自 inputs.tag || ref_name）。
+  #   - push tag 触发：直接用触发的 tag（github.ref_name）；
+  #   - 手动触发且填了 tag：用填的（补发已存在版本）；
+  #   - 手动触发未填 tag：用 next-version.sh 算下一个 vX.Y.Z-ccs.N，建 tag 并推送。
+  resolve:
+    name: 解析出包版本号
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - name: Checkout（含全部 tag，供 next-version.sh 计算）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 计算/确定版本号
+        id: resolve
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "push" ]; then
+            # tag 推送触发：ref_name 就是 tag。
+            version="$REF_NAME"
+            echo "push tag 触发，版本：$version"
+          elif [ -n "${INPUT_TAG:-}" ]; then
+            # 手动触发且填了 tag：补发已存在版本，不新建 tag。
+            version="$INPUT_TAG"
+            echo "手动补发已存在版本：$version"
+          else
+            # 手动触发未填 tag：自动算下一个 vX.Y.Z-ccs.N，建 tag 并推送。
+            git fetch --tags --quiet origin || true
+            version="$(scripts/next-version.sh | sed -n 's/^tag=//p')"
+            [ -n "$version" ] || { echo "❌ next-version.sh 未算出版本号" >&2; exit 1; }
+            echo "自动计算下一个版本：$version"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag "$version"
+            git push origin "$version"
+            echo "已建 tag 并推送：$version"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
   build:
     name: 构建（${{ matrix.label }}）
+    needs: resolve
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -60,12 +110,12 @@ jobs:
             label: macos-universal
 
     steps:
-      - name: Checkout（含 submodule，checkout 到触发 tag）
+      - name: Checkout（含 submodule，checkout 到出包 tag）
         uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ needs.resolve.outputs.version }}
 
       - name: 干净 checkout submodule 到 BASE_TAG 并按 NN 序重放补丁
         shell: bash
@@ -84,7 +134,7 @@ jobs:
       - name: 注入定制版本号到 tauri.conf.json
         shell: bash
         env:
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          TAG: ${{ needs.resolve.outputs.version }}
         run: |
           set -euo pipefail
           # 关键：app 内嵌版本必须等于 latest.json 的 version，updater 才能正确比对。
@@ -209,7 +259,7 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p release-assets
-          VERSION="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${{ needs.resolve.outputs.version }}"
           TAR_GZ=""; DMG=""
           for path in \
             "upstream/src-tauri/target/universal-apple-darwin/release/bundle/macos" \
@@ -236,7 +286,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path release-assets | Out-Null
-          $VERSION = if ($env:INPUT_TAG) { $env:INPUT_TAG } else { $env:GITHUB_REF_NAME }
+          $VERSION = $env:RESOLVED_VERSION
           $msi = Get-ChildItem -Path 'upstream/src-tauri/target/release/bundle/msi' -Recurse -Include *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($null -eq $msi) {
             throw 'No Windows MSI installer found'
@@ -263,7 +313,7 @@ jobs:
             Remove-Item -Recurse -Force $portableDir
           }
         env:
-          INPUT_TAG: ${{ github.event.inputs.tag }}
+          RESOLVED_VERSION: ${{ needs.resolve.outputs.version }}
 
       - name: 收集 Linux 产物
         if: runner.os == 'Linux'
@@ -271,7 +321,7 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p release-assets
-          VERSION="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${{ needs.resolve.outputs.version }}"
           APPIMAGE=$(find upstream/src-tauri/target/release/bundle -name "*.AppImage" | head -1 || true)
           if [ -z "$APPIMAGE" ]; then
             echo "❌ 未找到 AppImage（Linux updater 产物）" >&2
@@ -295,7 +345,7 @@ jobs:
   publish:
     name: 组装 latest.json + 发布 + R2 双写
     runs-on: ubuntu-22.04
-    needs: build
+    needs: [resolve, build]
     permissions:
       contents: write
     steps:
@@ -313,7 +363,7 @@ jobs:
       - name: 组装 latest.json
         shell: bash
         env:
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          TAG: ${{ needs.resolve.outputs.version }}
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
@@ -369,11 +419,11 @@ jobs:
       - name: 发布 GitHub Release（存档 / 手动下载回退）
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          name: CC Switch ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ needs.resolve.outputs.version }}
+          name: CC Switch ${{ needs.resolve.outputs.version }}
           prerelease: true
           body: |
-            ## CC Switch ${{ github.event.inputs.tag || github.ref_name }}
+            ## CC Switch ${{ needs.resolve.outputs.version }}
 
             自更新源为 R2（dl.dokng.com/cc-switch）。此处附件仅作存档 / 手动下载。
 
