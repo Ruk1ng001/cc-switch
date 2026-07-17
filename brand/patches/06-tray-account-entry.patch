@@ -1,4 +1,4 @@
-# 07-tray-account-entry —— 托盘菜单加「我的账户」快捷入口
+# 06-tray-account-entry —— 托盘菜单加「我的账户」快捷入口
 #
 # 职责：在系统托盘菜单顶部（「打开主界面」后、「打开官方网站」前）加一项「我的账户」，
 #       点击后弹出主窗口并直接打开账户面板（余额/用量/一键铺开各 CLI）。
@@ -16,7 +16,7 @@
 #
 # 依赖：04（accountPanelOpen 状态 + AccountPanel）。tray.rs 与其它补丁不共享文件。
 # 应用（在 upstream/ 内，基线为 brand/BASE_SHA）：
-#   git -C upstream apply brand/patches/07-tray-account-entry.patch
+#   git -C upstream apply brand/patches/06-tray-account-entry.patch
 diff --git a/src-tauri/src/tray.rs b/src-tauri/src/tray.rs
 index 95efbb87..40b4a0d2 100644
 --- a/src-tauri/src/tray.rs

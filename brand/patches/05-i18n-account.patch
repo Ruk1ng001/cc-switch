@@ -1,4 +1,4 @@
-# 06-i18n-account — 账户面板 i18n 文案（4 语言）
+# 05-i18n-account — 账户面板 i18n 文案（4 语言）
 #
 # 职责：为 04/05 补丁引入的 account.* 命名空间补齐 4 个 locale 的翻译。
 #       04 的组件里所有 t() 调用都带 defaultValue（中文兜底），本补丁缺失时 UI 仍可用中文回落；
@@ -15,7 +15,7 @@
 #
 # 依赖：04（账户面板 UI，引用 account.* key）。与其它补丁不共享文件。
 # 应用（在 upstream/ 内，基线为 brand/BASE_SHA）：
-#   git -C upstream apply brand/patches/06-i18n-account.patch
+#   git -C upstream apply brand/patches/05-i18n-account.patch
 diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
 index 4dd0b9a6..905e2d50 100644
 --- a/src/i18n/locales/en.json
