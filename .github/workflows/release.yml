@@ -166,7 +166,10 @@ jobs:
           version: 9
 
       - name: 安装 Rust
-        uses: dtolnay/rust-toolchain@stable
+        # 关键：channel 必须匹配 upstream/rust-toolchain.toml（锁 1.95），否则 rustup 在
+        # upstream/ 内遵从该文件用 1.95 编译，而 target 却装在 stable 工具链上 → macOS
+        # universal 构建报 "Target x86_64-apple-darwin is not installed"。
+        uses: dtolnay/rust-toolchain@1.95
         with:
           targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
