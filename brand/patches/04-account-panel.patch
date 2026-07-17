@@ -22,7 +22,7 @@
 # 应用（在 upstream/ 内，基线为 brand/BASE_SHA）：
 #   git -C upstream apply brand/patches/04-account-panel.patch
 diff --git a/src/App.tsx b/src/App.tsx
-index 645f1002..a81343f3 100644
+index 645f1002..edcfb677 100644
 --- a/src/App.tsx
 +++ b/src/App.tsx
 @@ -25,6 +25,7 @@ import {
@@ -33,23 +33,17 @@ index 645f1002..a81343f3 100644
  } from "lucide-react";
  import { getCurrentWindow } from "@tauri-apps/api/window";
  import type { Provider, VisibleApps } from "@/types";
-@@ -82,6 +83,15 @@ import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
+@@ -82,6 +83,9 @@ import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
  import { FirstRunNoticeDialog } from "@/components/FirstRunNoticeDialog";
  import { AgentsPanel } from "@/components/agents/AgentsPanel";
  import { UniversalProviderPanel } from "@/components/universal";
 +// [ccs] 账户面板（余额/用量 + 一键铺开 key）。见 components/account/*。
 +import { AccountPanel } from "@/components/account/AccountPanel";
-+import {
-+  Dialog,
-+  DialogContent,
-+  DialogHeader,
-+  DialogTitle,
-+  DialogDescription,
-+} from "@/components/ui/dialog";
++import { Dialog, DialogContent } from "@/components/ui/dialog";
  import { McpIcon } from "@/components/BrandIcons";
  import { Button } from "@/components/ui/button";
  import { SessionManagerPage } from "@/components/sessions/SessionManagerPage";
-@@ -174,6 +184,9 @@ function App() {
+@@ -174,6 +178,9 @@ function App() {
    const sharedFeatureApp: AppId =
      activeApp === "claude-desktop" ? "claude" : activeApp;
    const [currentView, setCurrentView] = useState<View>(getInitialView);
@@ -59,7 +53,7 @@ index 645f1002..a81343f3 100644
    const [skillsDiscoverySource, setSkillsDiscoverySource] =
      useState<SkillsPageSource>("repos");
    const [settingsDefaultTab, setSettingsDefaultTab] = useState("general");
-@@ -1215,6 +1228,16 @@ function App() {
+@@ -1215,6 +1222,16 @@ function App() {
                  >
                    <Settings className="w-4 h-4" />
                  </Button>
@@ -76,25 +70,18 @@ index 645f1002..a81343f3 100644
                  <UpdateBadge
                    onClick={() => {
                      setSettingsDefaultTab("about");
-@@ -1659,6 +1682,23 @@ function App() {
+@@ -1659,6 +1676,16 @@ function App() {
  
        <DeepLinkImportDialog />
        <FirstRunNoticeDialog />
 +
-+      {/* [ccs] 账户面板：列出本地 newapi 渠道 + 绑定新账户/一键铺开到各 CLI */}
++      {/* [ccs] 账户面板：列出本地 newapi 渠道 + 新增账户/一键铺开到各 CLI。
++          尺寸固定为视口的响应式比例（min() 夹取），不随主窗口尺寸难看伸缩（点 5）：
++          宽 min(42rem, 92vw)、高 min(40rem, 88vh)；面板内部自管固定头/滚动体/固定底布局。
++          p-0 去掉 DialogContent 默认内边距（面板各区自带 px-6）；面板自带关闭 X，故不用外层头部。 */}
 +      <Dialog open={accountPanelOpen} onOpenChange={setAccountPanelOpen}>
-+        <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
-+          <DialogHeader>
-+            <DialogTitle>
-+              {t("account.title", { defaultValue: "我的账户" })}
-+            </DialogTitle>
-+            <DialogDescription>
-+              {t("account.subtitle", {
-+                defaultValue: "管理 new-api 账户，一键铺开到各 CLI",
-+              })}
-+            </DialogDescription>
-+          </DialogHeader>
-+          <AccountPanel />
++        <DialogContent className="w-[min(42rem,92vw)] max-w-none h-[min(40rem,88vh)] max-h-none p-0 gap-0 overflow-hidden">
++          <AccountPanel onClose={() => setAccountPanelOpen(false)} />
 +        </DialogContent>
 +      </Dialog>
      </div>
@@ -102,42 +89,71 @@ index 645f1002..a81343f3 100644
  }
 diff --git a/src/components/account/AccountPanel.tsx b/src/components/account/AccountPanel.tsx
 new file mode 100644
-index 00000000..21cf868a
+index 00000000..8835801f
 --- /dev/null
 +++ b/src/components/account/AccountPanel.tsx
-@@ -0,0 +1,278 @@
-+// [ccs] 账户面板容器。
+@@ -0,0 +1,536 @@
++// [ccs] 账户面板容器（对齐 open-code 完整版：固定头部 + 固定账户概览 + 独立滚动 key 列表 + 底部新增）。
 +//
-+// 列出所有 providerType:"newapi" 的 UniversalProvider（= 一个个 new-api key），逐个渲染 KeyCard
-+// 展示余额/用量/key 元数据；并提供「绑定新账户」表单（复用 importKey.ts 的 bindAccount 组装
-+// 一条 newapi 渠道 + 铺开到各 CLI）。KeyCard 的「重新铺开」走 reapplyProvider。
++// 列出所有 providerType:"newapi" 的 UniversalProvider（= 一个个 Dokng key），逐个渲染 KeyCard
++// 展示 key 级用量；顶部账户概览取首个渠道的 profile 展示账户余额/额度环/今日用量；「新增账户」
++// 走嵌套 Dialog（AddAccountDialog），绑定即 bindAccount（upsert + sync 铺开到各 CLI）。
 +//
 +// 与 open-code 的账户体系对齐：那边是「账户 → 多 key → 激活写入各 CLI」；cc-switch 里没有独立的
 +// 账户实体，一条 newapi 渠道即一个 key，绑定/激活统一落到 UniversalProvider 的 upsert + sync。
 +// 渠道列表用 cc-switch 现成的 universalProvidersApi（settings KV 落盘），本层不新增任何存储。
++//
++// 布局（点 2/4/5）：整体 flex 纵向占满 Dialog 高度，只有 key 列表区 flex-1 overflow-y-auto 滚动，
++// 头部/账户概览/底部固定不滚动；右上角自带关闭 X。Dialog 尺寸在 App.tsx 用 min() 约束（点 5）。
++// 样式全走项目 UI 基元与主题变量（点 6）。
 +
 +import { useCallback, useEffect, useState } from "react";
 +import { useTranslation } from "react-i18next";
-+import { UserPlus, RefreshCw } from "lucide-react";
++import { useQueryClient } from "@tanstack/react-query";
++import { Plus, RefreshCw, LayoutDashboard, Wallet, X } from "lucide-react";
 +import { toast } from "sonner";
-+import { Card, CardContent } from "@/components/ui/card";
 +import { Button } from "@/components/ui/button";
 +import { Input } from "@/components/ui/input";
 +import { Label } from "@/components/ui/label";
++import { Badge } from "@/components/ui/badge";
++import {
++  Dialog,
++  DialogContent,
++  DialogHeader,
++  DialogTitle,
++  DialogDescription,
++  DialogFooter,
++} from "@/components/ui/dialog";
 +import { ConfirmDialog } from "@/components/ConfirmDialog";
-+import { universalProvidersApi } from "@/lib/api";
++import { universalProvidersApi, settingsApi } from "@/lib/api";
 +import type { UniversalProvider, UniversalProvidersMap } from "@/types";
 +import { KeyCard } from "./KeyCard";
++import { useAccountProfile, accountKeys } from "./useAccountProfile";
 +import { bindAccount, reapplyProvider } from "./importKey";
++import {
++  formatCurrency,
++  formatTokenCount,
++  usedPercent,
++  avatarInitial,
++} from "@/lib/account/format";
 +
-+// [ccs] 内置 new-api 站点根：写死为本项目自建网关，用户绑定时无需（也无法）填接口地址。
-+// 该值会同时用于 (1) 铺开到各 CLI 的 ANTHROPIC_BASE_URL（原样写入，new-api 在站点根挂
++// [ccs] 内置 Dokng 站点根：写死为本项目自建网关，用户绑定时无需（也无法）填接口地址。
++// 该值会同时用于 (1) 铺开到各 CLI 的 ANTHROPIC_BASE_URL（原样写入，Dokng 在站点根挂
 +// Anthropic 兼容端点）；(2) 查余额（后端 derive_api_base 从此推导 /api/app/profile）。
 +// 换网关只改这一处常量即可。
 +export const BUILTIN_NEWAPI_BASE_URL = "https://dokng.com";
++// [ccs] 控制台 / 充值外链（对齐 open-code：控制台 = 站点根 + /dashboard；充值回退站点根）。
++const CONSOLE_URL = `${BUILTIN_NEWAPI_BASE_URL}/dashboard`;
++const TOPUP_URL = BUILTIN_NEWAPI_BASE_URL;
 +
-+export function AccountPanel() {
++interface AccountPanelProps {
++  // [ccs] 关闭整个账户面板（右上角 X 与外层 Dialog 共用）。
++  onClose: () => void;
++}
++
++export function AccountPanel({ onClose }: AccountPanelProps) {
 +  const { t } = useTranslation();
++  const queryClient = useQueryClient();
 +
 +  const [providers, setProviders] = useState<UniversalProvidersMap>({});
 +  const [loading, setLoading] = useState(true);
@@ -145,16 +161,12 @@ index 00000000..21cf868a
 +  const [reapplyingId, setReapplyingId] = useState<string | null>(null);
 +  // [ccs] 正在删除的渠道 id（禁用对应卡片删除按钮）。
 +  const [deletingId, setDeletingId] = useState<string | null>(null);
-+  // [ccs] 待确认删除的渠道（非空即弹出 ConfirmDialog）。用项目统一的 ConfirmDialog 而非
-+  // window.confirm——后者在 Tauri WebView（尤其 Linux WebKitGTK）行为不一致且样式脱离主题。
++  // [ccs] 待确认删除的渠道（非空即弹出 ConfirmDialog）。
 +  const [deleteTarget, setDeleteTarget] = useState<UniversalProvider | null>(
 +    null,
 +  );
-+
-+  // 绑定表单（接口地址内置为 BUILTIN_NEWAPI_BASE_URL，不暴露给用户）
-+  const [apiKey, setApiKey] = useState("");
-+  const [name, setName] = useState("");
-+  const [binding, setBinding] = useState(false);
++  // [ccs] 新增账户嵌套 Dialog 开关（点 3）。
++  const [addOpen, setAddOpen] = useState(false);
 +
 +  const load = useCallback(async () => {
 +    try {
@@ -175,7 +187,7 @@ index 00000000..21cf868a
 +    load();
 +  }, [load]);
 +
-+  // 只展示 newapi 渠道（一条 = 一个 new-api key）。按 sortIndex → createdAt 稳定排序。
++  // 只展示 newapi 渠道（一条 = 一个 Dokng key）。按 sortIndex → createdAt 稳定排序。
 +  const newapiProviders = Object.values(providers)
 +    .filter((p) => p.providerType === "newapi")
 +    .sort((a, b) => {
@@ -184,37 +196,8 @@ index 00000000..21cf868a
 +      return (a.createdAt ?? 0) - (b.createdAt ?? 0);
 +    });
 +
-+  const handleBind = useCallback(async () => {
-+    if (!apiKey.trim()) {
-+      toast.error(
-+        t("account.bindMissing", {
-+          defaultValue: "请填写 API Key",
-+        }),
-+      );
-+      return;
-+    }
-+    try {
-+      setBinding(true);
-+      // [ccs] 接口地址内置，不由用户填写。
-+      await bindAccount({ baseUrl: BUILTIN_NEWAPI_BASE_URL, apiKey, name });
-+      toast.success(
-+        t("account.bindSuccess", { defaultValue: "已绑定并铺开到各 CLI" }),
-+      );
-+      setApiKey("");
-+      setName("");
-+      await load();
-+    } catch (error) {
-+      const message = error instanceof Error ? error.message : String(error);
-+      toast.error(
-+        t("account.bindError", {
-+          defaultValue: "绑定失败：{{error}}",
-+          error: message,
-+        }),
-+      );
-+    } finally {
-+      setBinding(false);
-+    }
-+  }, [apiKey, name, load, t]);
++  // [ccs] 账户概览取首个渠道的 profile（账户级余额/额度为账户维度，同账户各 key 同源）。
++  const primaryProvider = newapiProviders[0];
 +
 +  const handleReapply = useCallback(
 +    async (provider: UniversalProvider) => {
@@ -268,68 +251,89 @@ index 00000000..21cf868a
 +    }
 +  }, [deleteTarget, load, t]);
 +
-+  return (
-+    <div className="space-y-4">
-+      {/* 绑定新账户表单 */}
-+      <Card>
-+        <CardContent className="p-4 space-y-3">
-+          <div className="flex items-center gap-2">
-+            <UserPlus className="w-4 h-4 text-muted-foreground" />
-+            <span className="font-medium">
-+              {t("account.bindTitle", { defaultValue: "绑定新账户" })}
-+            </span>
-+          </div>
-+          <div className="grid gap-3 sm:grid-cols-2">
-+            <div className="space-y-1 sm:col-span-2">
-+              <Label htmlFor="ccs-account-name">
-+                {t("account.displayName", { defaultValue: "展示名（可选）" })}
-+              </Label>
-+              <Input
-+                id="ccs-account-name"
-+                value={name}
-+                onChange={(e) => setName(e.target.value)}
-+                placeholder={t("account.namePlaceholder", {
-+                  defaultValue: "留空用远端名称",
-+                })}
-+                disabled={binding}
-+              />
-+            </div>
-+            <div className="space-y-1 sm:col-span-2">
-+              <Label htmlFor="ccs-account-key">
-+                {t("account.apiKey", { defaultValue: "API Key" })}
-+              </Label>
-+              <Input
-+                id="ccs-account-key"
-+                type="password"
-+                value={apiKey}
-+                onChange={(e) => setApiKey(e.target.value)}
-+                placeholder="sk-..."
-+                disabled={binding}
-+              />
-+            </div>
-+          </div>
-+          <div className="flex justify-end">
-+            <Button onClick={handleBind} disabled={binding}>
-+              {binding
-+                ? t("account.binding", { defaultValue: "绑定中…" })
-+                : t("account.bind", { defaultValue: "绑定并铺开" })}
-+            </Button>
-+          </div>
-+        </CardContent>
-+      </Card>
++  // [ccs] 在系统默认浏览器打开外链（控制台 / 充值）。走 settingsApi.openExternal
++  // （→ 后端 opener），已内建 http/https 校验；客户端内不实现任何支付逻辑。
++  const openExternal = useCallback(
++    async (url: string) => {
++      try {
++        await settingsApi.openExternal(url);
++      } catch (error) {
++        const message = error instanceof Error ? error.message : String(error);
++        toast.error(
++          t("account.openLinkError", {
++            defaultValue: "打开链接失败：{{error}}",
++            error: message,
++          }),
++        );
++      }
++    },
++    [t],
++  );
 +
-+      {/* 已绑定的 key 列表 */}
-+      <div className="flex items-center justify-between">
-+        <span className="text-sm text-muted-foreground">
-+          {t("account.listTitle", {
-+            defaultValue: "已绑定账户",
-+          })}
++  // [ccs] 刷新全部：让列表 + 所有 key/账户 profile 查询失效重拉（react-query 统一驱动）。
++  const refreshAll = useCallback(() => {
++    load();
++    queryClient.invalidateQueries({ queryKey: accountKeys.all });
++  }, [load, queryClient]);
++
++  return (
++    <div className="flex h-full flex-col overflow-hidden">
++      {/* ── 固定头部：标题 + 控制台/充值 + 关闭 X（点 1/4）───────────────── */}
++      <div className="flex items-start justify-between gap-3 border-b border-border-default bg-muted/20 px-6 py-4 flex-shrink-0">
++        <div className="min-w-0 space-y-1">
++          <DialogTitle className="text-lg font-semibold leading-tight tracking-tight">
++            {t("account.title", { defaultValue: "我的账户" })}
++          </DialogTitle>
++          <DialogDescription className="text-sm text-muted-foreground">
++            {t("account.subtitle", {
++              defaultValue: "管理 Dokng 账户，一键铺开到 Claude / Codex / Gemini",
++            })}
++          </DialogDescription>
++        </div>
++        <div className="flex items-center gap-1.5 flex-shrink-0">
++          <Button
++            variant="outline"
++            size="sm"
++            onClick={() => openExternal(CONSOLE_URL)}
++          >
++            <LayoutDashboard className="w-4 h-4 mr-1.5" />
++            {t("account.console", { defaultValue: "控制台" })}
++          </Button>
++          <Button
++            variant="outline"
++            size="sm"
++            onClick={() => openExternal(TOPUP_URL)}
++          >
++            <Wallet className="w-4 h-4 mr-1.5" />
++            {t("account.topup", { defaultValue: "充值" })}
++          </Button>
++          <Button
++            variant="ghost"
++            size="icon"
++            onClick={onClose}
++            title={t("common.close", { defaultValue: "关闭" })}
++            aria-label={t("common.close", { defaultValue: "关闭" })}
++          >
++            <X className="w-4 h-4" />
++          </Button>
++        </div>
++      </div>
++
++      {/* ── 固定账户概览（点 2：这块不滚动）──────────────────────────────── */}
++      {primaryProvider && (
++        <AccountOverview provider={primaryProvider} />
++      )}
++
++      {/* ── 列表工具条（固定）：已绑定账户 (N) + 刷新 ──────────────────── */}
++      <div className="flex items-center justify-between px-6 pt-4 pb-2 flex-shrink-0">
++        <span className="text-sm font-medium">
++          {t("account.listTitle", { defaultValue: "已绑定账户" })}
 +          {newapiProviders.length > 0 ? ` (${newapiProviders.length})` : ""}
 +        </span>
 +        <Button
 +          variant="ghost"
 +          size="icon"
-+          onClick={load}
++          onClick={refreshAll}
 +          disabled={loading}
 +          title={t("account.reloadList", { defaultValue: "刷新列表" })}
 +        >
@@ -337,19 +341,20 @@ index 00000000..21cf868a
 +        </Button>
 +      </div>
 +
-+      {loading ? (
-+        <div className="text-sm text-muted-foreground py-8 text-center">
-+          {t("account.loading", { defaultValue: "加载中…" })}
-+        </div>
-+      ) : newapiProviders.length === 0 ? (
-+        <div className="text-sm text-muted-foreground py-8 text-center">
-+          {t("account.empty", {
-+            defaultValue: "还没有绑定任何账户，用上方表单绑定第一个",
-+          })}
-+        </div>
-+      ) : (
-+        <div className="space-y-3">
-+          {newapiProviders.map((provider) => (
++      {/* ── 唯一滚动区：key 列表（点 2）────────────────────────────────── */}
++      <div className="flex-1 min-h-0 overflow-y-auto px-6 pb-4 space-y-3">
++        {loading ? (
++          <div className="text-sm text-muted-foreground py-8 text-center">
++            {t("account.loading", { defaultValue: "加载中…" })}
++          </div>
++        ) : newapiProviders.length === 0 ? (
++          <div className="text-sm text-muted-foreground py-10 text-center">
++            {t("account.empty", {
++              defaultValue: "还没有绑定任何账户，点下方「新增账户」绑定第一个",
++            })}
++          </div>
++        ) : (
++          newapiProviders.map((provider) => (
 +            <KeyCard
 +              key={provider.id}
 +              provider={provider}
@@ -358,14 +363,26 @@ index 00000000..21cf868a
 +              onDelete={requestDelete}
 +              deleting={deletingId === provider.id}
 +            />
-+          ))}
-+        </div>
-+      )}
++          ))
++        )}
++      </div>
 +
-+      {/* [ccs] 删除确认：复用项目统一 ConfirmDialog（危险色 + 警告图标）。
-+          嵌套在账户面板 Dialog 内，zIndex=alert(z-60) 高于账户面板(z-40)；ESC 只关本框、
-+          点外部不关（dialog.tsx 默认），确认/取消二选一。避免 window.confirm 在 Tauri
-+          WebView（尤其 Linux WebKitGTK）上样式突兀 / 行为不一致的问题。 */}
++      {/* ── 固定底部：新增账户（点 3，弹嵌套 Dialog）───────────────────── */}
++      <div className="border-t border-border-default bg-muted/20 px-6 py-3 flex-shrink-0">
++        <Button className="w-full" onClick={() => setAddOpen(true)}>
++          <Plus className="w-4 h-4 mr-1.5" />
++          {t("account.addAccount", { defaultValue: "新增账户" })}
++        </Button>
++      </div>
++
++      {/* [ccs] 新增账户嵌套 Dialog（zIndex=nested，覆于账户面板之上）。 */}
++      <AddAccountDialog
++        open={addOpen}
++        onOpenChange={setAddOpen}
++        onBound={load}
++      />
++
++      {/* [ccs] 删除确认：复用项目统一 ConfirmDialog（危险色 + 警告图标）。 */}
 +      <ConfirmDialog
 +        isOpen={deleteTarget !== null}
 +        title={t("account.deleteConfirmTitle", { defaultValue: "删除账户" })}
@@ -384,12 +401,240 @@ index 00000000..21cf868a
 +    </div>
 +  );
 +}
++
++// [ccs] 账户概览：取首个渠道 profile 展示账户级余额 + 额度环 + 今日用量。固定不滚动（点 2）。
++// 自身调 useAccountProfile（与对应 KeyCard 同 queryKey，react-query 去重，不重复请求）。
++function AccountOverview({ provider }: { provider: UniversalProvider }) {
++  const { t } = useTranslation();
++  const { data } = useAccountProfile({
++    keyId: provider.id,
++    baseUrl: provider.baseUrl,
++    apiKey: provider.apiKey,
++  });
++  const profile = data?.ok ? data.profile : undefined;
++
++  const displayName =
++    profile?.displayName?.trim() ||
++    profile?.username?.trim() ||
++    provider.name.trim() ||
++    t("account.unnamedKey", { defaultValue: "未命名 key" });
++  const username = profile?.username?.trim() ?? "";
++  const pct = profile
++    ? usedPercent(profile.accountUsedQuota, profile.accountTotalQuota)
++    : 0;
++
++  return (
++    <div className="border-b border-border-default px-6 py-4 flex-shrink-0 space-y-4">
++      {/* 身份行：头像 + 名称 + 已连接 */}
++      <div className="flex items-center gap-3">
++        {profile?.avatar ? (
++          <img
++            src={profile.avatar}
++            alt=""
++            className="h-10 w-10 rounded-full object-cover"
++          />
++        ) : (
++          <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary/10 text-primary font-semibold">
++            {avatarInitial(displayName)}
++          </div>
++        )}
++        <div className="min-w-0 flex-1">
++          <div className="flex items-center gap-2">
++            <span className="font-medium truncate">{displayName}</span>
++            {profile && (
++              <Badge variant="secondary" className="flex-shrink-0">
++                {t("account.connected", { defaultValue: "已连接" })}
++              </Badge>
++            )}
++          </div>
++          {username && (
++            <span className="text-xs text-muted-foreground truncate">
++              @{username}
++            </span>
++          )}
++        </div>
++      </div>
++
++      {/* 账户级指标：额度环 + 余额 / 今日 Tokens / 今日请求 */}
++      <div className="flex items-center gap-5">
++        <div
++          className="relative h-[72px] w-[72px] flex-shrink-0 rounded-full"
++          style={{
++            background: `conic-gradient(rgb(59 130 246) ${pct * 3.6}deg, rgb(148 163 184 / 0.25) 0deg)`,
++          }}
++          role="img"
++          aria-label={t("account.usageRingLabel", {
++            defaultValue: "账户额度已用 {{pct}}%",
++            pct,
++          })}
++        >
++          <div className="absolute inset-[7px] flex flex-col items-center justify-center rounded-full bg-background">
++            <strong className="text-sm font-semibold tabular-nums">
++              {profile ? `${pct}%` : "—"}
++            </strong>
++            <span className="text-[10px] text-muted-foreground">
++              {t("account.used", { defaultValue: "已用" })}
++            </span>
++          </div>
++        </div>
++        <div className="grid flex-1 grid-cols-3 gap-3">
++          <OverviewMetric
++            label={t("account.accountBalance", { defaultValue: "账户余额" })}
++            value={
++              profile ? formatCurrency(profile.accountRemainingQuota) : "—"
++            }
++          />
++          <OverviewMetric
++            label={t("account.todayTokens", { defaultValue: "今日 Tokens" })}
++            value={
++              profile ? formatTokenCount(profile.accountTokensUsedToday) : "—"
++            }
++          />
++          <OverviewMetric
++            label={t("account.todayRequests", { defaultValue: "今日请求" })}
++            value={
++              profile?.requestCountToday == null
++                ? "—"
++                : String(profile.requestCountToday)
++            }
++          />
++        </div>
++      </div>
++    </div>
++  );
++}
++
++function OverviewMetric({ label, value }: { label: string; value: string }) {
++  return (
++    <div className="space-y-0.5">
++      <div className="text-xs text-muted-foreground">{label}</div>
++      <div className="text-sm font-semibold tabular-nums">{value}</div>
++    </div>
++  );
++}
++
++// [ccs] 新增账户嵌套 Dialog（点 3）。接口地址内置为 BUILTIN_NEWAPI_BASE_URL，不暴露给用户。
++// 绑定 = bindAccount（用 NewAPI 预设组装一条 newapi 渠道 → upsert + sync 铺开到各 CLI）。
++// zIndex=nested（z-50）覆于账户面板（z-40）之上；成功后回调 onBound 刷新父列表并自关。
++function AddAccountDialog({
++  open,
++  onOpenChange,
++  onBound,
++}: {
++  open: boolean;
++  onOpenChange: (open: boolean) => void;
++  onBound: () => void | Promise<void>;
++}) {
++  const { t } = useTranslation();
++  const [apiKey, setApiKey] = useState("");
++  const [name, setName] = useState("");
++  const [binding, setBinding] = useState(false);
++
++  // 每次打开重置表单，避免上次残留。
++  useEffect(() => {
++    if (open) {
++      setApiKey("");
++      setName("");
++      setBinding(false);
++    }
++  }, [open]);
++
++  const handleBind = useCallback(async () => {
++    if (!apiKey.trim()) {
++      toast.error(t("account.bindMissing", { defaultValue: "请填写 API Key" }));
++      return;
++    }
++    try {
++      setBinding(true);
++      await bindAccount({ baseUrl: BUILTIN_NEWAPI_BASE_URL, apiKey, name });
++      toast.success(
++        t("account.bindSuccess", { defaultValue: "已绑定并铺开到各 CLI" }),
++      );
++      await onBound();
++      onOpenChange(false);
++    } catch (error) {
++      const message = error instanceof Error ? error.message : String(error);
++      toast.error(
++        t("account.bindError", {
++          defaultValue: "绑定失败：{{error}}",
++          error: message,
++        }),
++      );
++    } finally {
++      setBinding(false);
++    }
++  }, [apiKey, name, onBound, onOpenChange, t]);
++
++  return (
++    <Dialog open={open} onOpenChange={onOpenChange}>
++      <DialogContent className="max-w-md" zIndex="nested">
++        <DialogHeader>
++          <DialogTitle>
++            {t("account.addAccount", { defaultValue: "新增账户" })}
++          </DialogTitle>
++          <DialogDescription>
++            {t("account.addSubtitle", {
++              defaultValue: "粘贴 Dokng API Key 绑定账户，绑定后自动铺开到各 CLI",
++            })}
++          </DialogDescription>
++        </DialogHeader>
++        <div className="space-y-3 px-6 py-4">
++          <div className="space-y-1">
++            <Label htmlFor="ccs-account-name">
++              {t("account.displayName", { defaultValue: "展示名（可选）" })}
++            </Label>
++            <Input
++              id="ccs-account-name"
++              value={name}
++              onChange={(e) => setName(e.target.value)}
++              placeholder={t("account.namePlaceholder", {
++                defaultValue: "留空用远端名称",
++              })}
++              disabled={binding}
++            />
++          </div>
++          <div className="space-y-1">
++            <Label htmlFor="ccs-account-key">
++              {t("account.apiKey", { defaultValue: "API Key" })}
++            </Label>
++            <Input
++              id="ccs-account-key"
++              type="password"
++              autoComplete="off"
++              value={apiKey}
++              onChange={(e) => setApiKey(e.target.value)}
++              onKeyDown={(e) => {
++                if (e.key === "Enter" && !binding) handleBind();
++              }}
++              placeholder="sk-..."
++              disabled={binding}
++            />
++          </div>
++        </div>
++        <DialogFooter>
++          <Button
++            variant="outline"
++            onClick={() => onOpenChange(false)}
++            disabled={binding}
++          >
++            {t("common.cancel", { defaultValue: "取消" })}
++          </Button>
++          <Button onClick={handleBind} disabled={binding}>
++            {binding
++              ? t("account.binding", { defaultValue: "绑定中…" })
++              : t("account.bind", { defaultValue: "绑定并铺开" })}
++          </Button>
++        </DialogFooter>
++      </DialogContent>
++    </Dialog>
++  );
++}
 diff --git a/src/components/account/KeyCard.tsx b/src/components/account/KeyCard.tsx
 new file mode 100644
-index 00000000..c4f566e5
+index 00000000..c1f9cd98
 --- /dev/null
 +++ b/src/components/account/KeyCard.tsx
-@@ -0,0 +1,227 @@
+@@ -0,0 +1,221 @@
 +// [ccs] 账户面板里的单个 key 卡片。
 +//
 +// cc-switch 里「一个 new-api key」= 一条 providerType:"newapi" 的 UniversalProvider。
@@ -413,7 +658,6 @@ index 00000000..c4f566e5
 +  formatCurrency,
 +  formatTokenCount,
 +  maskKey,
-+  usedPercent,
 +  keyUsedPercent,
 +  formatExpiry,
 +  keyStatusLabel,
@@ -529,16 +773,26 @@ index 00000000..c4f566e5
 +          <div className="text-xs text-destructive">{errorText}</div>
 +        )}
 +
-+        {/* 就绪态：余额 + 用量指标 */}
++        {/* 就绪态：key 级用量指标（账户级余额/今日用量在面板顶部概览展示，此处不重复）。 */}
 +        {profile && (
 +          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
 +            <Metric
-+              label={t("account.accountBalance", { defaultValue: "账户余额" })}
-+              value={formatCurrency(profile.accountRemainingQuota)}
++              label={t("account.keyTokensToday", {
++                defaultValue: "今日 Tokens",
++              })}
++              value={formatTokenCount(profile.keyTokensUsedToday)}
 +            />
 +            <Metric
-+              label={t("account.todayTokens", { defaultValue: "今日 Tokens" })}
-+              value={formatTokenCount(profile.accountTokensUsedToday)}
++              label={t("account.keyCostToday", { defaultValue: "今日费用" })}
++              value={
++                profile.keyQuotaUsedToday == null
++                  ? "—"
++                  : formatCurrency(profile.keyQuotaUsedToday)
++              }
++            />
++            <Metric
++              label={t("account.keyCostTotal", { defaultValue: "累计费用" })}
++              value={formatCurrency(profile.keyUsedQuota)}
 +            />
 +            <Metric
 +              label={t("account.keyQuota", { defaultValue: "Key 额度" })}
@@ -548,31 +802,16 @@ index 00000000..c4f566e5
 +                  : formatCurrency(profile.keyRemainingQuota)
 +              }
 +            />
-+            <Metric
-+              label={t("account.todayRequests", { defaultValue: "今日请求" })}
-+              value={
-+                profile.requestCountToday === null
-+                  ? "—"
-+                  : String(profile.requestCountToday)
-+              }
-+            />
 +          </div>
 +        )}
 +
-+        {/* 账户额度使用率条（unlimited 不展示） */}
++        {/* key 额度使用率条（unlimited 不展示；用 key 级已用/剩余换算）。 */}
 +        {profile && !profile.keyUnlimitedQuota && (
 +          <UsageBar
-+            percent={
-+              profile.accountTotalQuota > 0
-+                ? usedPercent(
-+                    profile.accountUsedQuota,
-+                    profile.accountTotalQuota,
-+                  )
-+                : keyUsedPercent(
-+                    profile.keyUsedQuota,
-+                    profile.keyRemainingQuota,
-+                  )
-+            }
++            percent={keyUsedPercent(
++              profile.keyUsedQuota,
++              profile.keyRemainingQuota,
++            )}
 +          />
 +        )}
 +

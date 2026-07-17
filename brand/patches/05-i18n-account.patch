@@ -10,23 +10,34 @@
 #   - src/i18n/locales/en.json
 #   - src/i18n/locales/ja.json
 #
-# key 集合与 04/05 组件中 t("account.*") 引用严格 1:1（经脚本比对：零缺失、零多余，各 30 个 key）。
+# key 集合与 04 组件中 t("account.*") 引用严格 1:1（经脚本比对：零缺失，各 45 个 key）。
 # 采用「首行后插入」而非重排，最大化减少与上游 locale 的 diff 面（仅新增行，不动既有翻译字节）。
 #
 # 依赖：04（账户面板 UI，引用 account.* key）。与其它补丁不共享文件。
 # 应用（在 upstream/ 内，基线为 brand/BASE_SHA）：
 #   git -C upstream apply brand/patches/05-i18n-account.patch
 diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
-index 4dd0b9a6..2747aa3a 100644
+index 4dd0b9a6..1893d10e 100644
 --- a/src/i18n/locales/en.json
 +++ b/src/i18n/locales/en.json
-@@ -1,4 +1,40 @@
+@@ -1,4 +1,51 @@
  {
 +  "account": {
 +    "title": "My Account",
 +    "subtitle": "Manage new-api accounts and deploy to all CLIs in one click",
 +    "listTitle": "Bound accounts",
 +    "reloadList": "Refresh list",
++    "console": "Console",
++    "topup": "Top up",
++    "addAccount": "Add account",
++    "addSubtitle": "Paste your Dokng API Key to bind an account; it deploys to all CLIs automatically",
++    "connected": "Connected",
++    "keyTokensToday": "Tokens today",
++    "keyCostToday": "Cost today",
++    "keyCostTotal": "Total cost",
++    "openLinkError": "Failed to open link: {{error}}",
++    "usageRingLabel": "Account quota used {{pct}}%",
++    "used": "Used",
 +    "empty": "No accounts bound yet. Use the form above to bind your first one.",
 +    "bindTitle": "Bind new account",
 +    "baseUrl": "Endpoint URL",
@@ -62,16 +73,27 @@ index 4dd0b9a6..2747aa3a 100644
      "title": "CC Switch",
      "description": "All-in-One Assistant for Claude Code, Codex & Gemini CLI"
 diff --git a/src/i18n/locales/ja.json b/src/i18n/locales/ja.json
-index 94dfe2c5..2fbb1157 100644
+index 94dfe2c5..44079409 100644
 --- a/src/i18n/locales/ja.json
 +++ b/src/i18n/locales/ja.json
-@@ -1,4 +1,36 @@
+@@ -1,4 +1,51 @@
  {
 +  "account": {
 +    "title": "マイアカウント",
 +    "subtitle": "new-api アカウントを管理し、各 CLI にワンクリックで展開",
 +    "listTitle": "バインド済みアカウント",
 +    "reloadList": "リストを更新",
++    "console": "コンソール",
++    "topup": "チャージ",
++    "addAccount": "アカウントを追加",
++    "addSubtitle": "Dokng API Key を貼り付けてアカウントをバインドすると、各 CLI に自動展開します",
++    "connected": "接続済み",
++    "keyTokensToday": "本日の Tokens",
++    "keyCostToday": "本日の費用",
++    "keyCostTotal": "累計費用",
++    "openLinkError": "リンクを開けませんでした：{{error}}",
++    "usageRingLabel": "アカウント額度の使用率 {{pct}}%",
++    "used": "使用済み",
 +    "empty": "まだアカウントがバインドされていません。上のフォームで最初のアカウントをバインドしてください。",
 +    "bindTitle": "新しいアカウントをバインド",
 +    "baseUrl": "エンドポイント URL",
@@ -97,22 +119,37 @@ index 94dfe2c5..2fbb1157 100644
 +    "importToClis": "各 CLI に再展開",
 +    "importing": "展開中…",
 +    "reapplySuccess": "各 CLI に再展開しました",
-+    "reapplyError": "展開失敗：{{error}}"
++    "reapplyError": "展開失敗：{{error}}",
++    "deleteConfirmTitle": "アカウントを削除",
++    "deleteConfirm": "アカウント「{{name}}」を削除しますか？この操作は取り消せません。",
++    "deleteSuccess": "アカウントを削除しました",
++    "deleteError": "削除失敗：{{error}}"
 +  },
    "app": {
      "title": "CC Switch",
      "description": "Claude Code・Codex・Gemini CLI のためのオールインワンアシスタント"
 diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
-index 8cab77aa..52707c5b 100644
+index 8cab77aa..f3992704 100644
 --- a/src/i18n/locales/zh-TW.json
 +++ b/src/i18n/locales/zh-TW.json
-@@ -1,4 +1,40 @@
+@@ -1,4 +1,51 @@
  {
 +  "account": {
 +    "title": "我的帳戶",
 +    "subtitle": "管理 new-api 帳戶，一鍵鋪開到各 CLI",
 +    "listTitle": "已綁定帳戶",
 +    "reloadList": "重新整理列表",
++    "console": "控制台",
++    "topup": "儲值",
++    "addAccount": "新增帳戶",
++    "addSubtitle": "貼上 Dokng API Key 綁定帳戶，綁定後自動鋪開到各 CLI",
++    "connected": "已連接",
++    "keyTokensToday": "今日 Tokens",
++    "keyCostToday": "今日費用",
++    "keyCostTotal": "累計費用",
++    "openLinkError": "開啟連結失敗：{{error}}",
++    "usageRingLabel": "帳戶額度已用 {{pct}}%",
++    "used": "已用",
 +    "empty": "還沒有綁定任何帳戶，用上方表單綁定第一個",
 +    "bindTitle": "綁定新帳戶",
 +    "baseUrl": "介面位址",
@@ -148,16 +185,27 @@ index 8cab77aa..52707c5b 100644
      "title": "CC Switch",
      "description": "Claude Code / Codex / Gemini CLI 全方位輔助工具"
 diff --git a/src/i18n/locales/zh.json b/src/i18n/locales/zh.json
-index b0f60dd3..c2cca42d 100644
+index b0f60dd3..915796d3 100644
 --- a/src/i18n/locales/zh.json
 +++ b/src/i18n/locales/zh.json
-@@ -1,4 +1,40 @@
+@@ -1,4 +1,51 @@
  {
 +  "account": {
 +    "title": "我的账户",
 +    "subtitle": "管理 new-api 账户，一键铺开到各 CLI",
 +    "listTitle": "已绑定账户",
 +    "reloadList": "刷新列表",
++    "console": "控制台",
++    "topup": "充值",
++    "addAccount": "新增账户",
++    "addSubtitle": "粘贴 Dokng API Key 绑定账户，绑定后自动铺开到各 CLI",
++    "connected": "已连接",
++    "keyTokensToday": "今日 Tokens",
++    "keyCostToday": "今日费用",
++    "keyCostTotal": "累计费用",
++    "openLinkError": "打开链接失败：{{error}}",
++    "usageRingLabel": "账户额度已用 {{pct}}%",
++    "used": "已用",
 +    "empty": "还没有绑定任何账户，用上方表单绑定第一个",
 +    "bindTitle": "绑定新账户",
 +    "baseUrl": "接口地址",
