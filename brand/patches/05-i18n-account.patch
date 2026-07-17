@@ -17,10 +17,10 @@
 # 应用（在 upstream/ 内，基线为 brand/BASE_SHA）：
 #   git -C upstream apply brand/patches/05-i18n-account.patch
 diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
-index 4dd0b9a6..905e2d50 100644
+index 4dd0b9a6..2747aa3a 100644
 --- a/src/i18n/locales/en.json
 +++ b/src/i18n/locales/en.json
-@@ -1,4 +1,36 @@
+@@ -1,4 +1,40 @@
  {
 +  "account": {
 +    "title": "My Account",
@@ -52,13 +52,17 @@ index 4dd0b9a6..905e2d50 100644
 +    "importToClis": "Redeploy to all CLIs",
 +    "importing": "Deploying…",
 +    "reapplySuccess": "Redeployed to all CLIs",
-+    "reapplyError": "Deploy failed: {{error}}"
++    "reapplyError": "Deploy failed: {{error}}",
++    "deleteConfirmTitle": "Delete account",
++    "deleteConfirm": "Delete account \"{{name}}\"? This cannot be undone.",
++    "deleteSuccess": "Account deleted",
++    "deleteError": "Delete failed: {{error}}"
 +  },
    "app": {
      "title": "CC Switch",
      "description": "All-in-One Assistant for Claude Code, Codex & Gemini CLI"
 diff --git a/src/i18n/locales/ja.json b/src/i18n/locales/ja.json
-index 94dfe2c5..4f4ea73a 100644
+index 94dfe2c5..2fbb1157 100644
 --- a/src/i18n/locales/ja.json
 +++ b/src/i18n/locales/ja.json
 @@ -1,4 +1,36 @@
@@ -99,10 +103,10 @@ index 94dfe2c5..4f4ea73a 100644
      "title": "CC Switch",
      "description": "Claude Code・Codex・Gemini CLI のためのオールインワンアシスタント"
 diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
-index 8cab77aa..73c7efd8 100644
+index 8cab77aa..52707c5b 100644
 --- a/src/i18n/locales/zh-TW.json
 +++ b/src/i18n/locales/zh-TW.json
-@@ -1,4 +1,36 @@
+@@ -1,4 +1,40 @@
  {
 +  "account": {
 +    "title": "我的帳戶",
@@ -134,16 +138,20 @@ index 8cab77aa..73c7efd8 100644
 +    "importToClis": "重新鋪開到各 CLI",
 +    "importing": "鋪開中…",
 +    "reapplySuccess": "已重新鋪開到各 CLI",
-+    "reapplyError": "鋪開失敗：{{error}}"
++    "reapplyError": "鋪開失敗：{{error}}",
++    "deleteConfirmTitle": "刪除帳戶",
++    "deleteConfirm": "確定刪除帳戶「{{name}}」？此操作無法復原。",
++    "deleteSuccess": "已刪除帳戶",
++    "deleteError": "刪除失敗：{{error}}"
 +  },
    "app": {
      "title": "CC Switch",
      "description": "Claude Code / Codex / Gemini CLI 全方位輔助工具"
 diff --git a/src/i18n/locales/zh.json b/src/i18n/locales/zh.json
-index b0f60dd3..909a2657 100644
+index b0f60dd3..c2cca42d 100644
 --- a/src/i18n/locales/zh.json
 +++ b/src/i18n/locales/zh.json
-@@ -1,4 +1,36 @@
+@@ -1,4 +1,40 @@
  {
 +  "account": {
 +    "title": "我的账户",
@@ -175,7 +183,11 @@ index b0f60dd3..909a2657 100644
 +    "importToClis": "重新铺开到各 CLI",
 +    "importing": "铺开中…",
 +    "reapplySuccess": "已重新铺开到各 CLI",
-+    "reapplyError": "铺开失败：{{error}}"
++    "reapplyError": "铺开失败：{{error}}",
++    "deleteConfirmTitle": "删除账户",
++    "deleteConfirm": "确定删除账户「{{name}}」？此操作不可撤销。",
++    "deleteSuccess": "已删除账户",
++    "deleteError": "删除失败：{{error}}"
 +  },
    "app": {
      "title": "CC Switch",

@@ -102,10 +102,10 @@ index 645f1002..a81343f3 100644
  }
 diff --git a/src/components/account/AccountPanel.tsx b/src/components/account/AccountPanel.tsx
 new file mode 100644
-index 00000000..d3b2eda7
+index 00000000..21cf868a
 --- /dev/null
 +++ b/src/components/account/AccountPanel.tsx
-@@ -0,0 +1,219 @@
+@@ -0,0 +1,278 @@
 +// [ccs] 账户面板容器。
 +//
 +// 列出所有 providerType:"newapi" 的 UniversalProvider（= 一个个 new-api key），逐个渲染 KeyCard
@@ -124,6 +124,7 @@ index 00000000..d3b2eda7
 +import { Button } from "@/components/ui/button";
 +import { Input } from "@/components/ui/input";
 +import { Label } from "@/components/ui/label";
++import { ConfirmDialog } from "@/components/ConfirmDialog";
 +import { universalProvidersApi } from "@/lib/api";
 +import type { UniversalProvider, UniversalProvidersMap } from "@/types";
 +import { KeyCard } from "./KeyCard";
@@ -142,6 +143,13 @@ index 00000000..d3b2eda7
 +  const [loading, setLoading] = useState(true);
 +  // 正在「重新铺开」的渠道 id（禁用对应卡片按钮）。
 +  const [reapplyingId, setReapplyingId] = useState<string | null>(null);
++  // [ccs] 正在删除的渠道 id（禁用对应卡片删除按钮）。
++  const [deletingId, setDeletingId] = useState<string | null>(null);
++  // [ccs] 待确认删除的渠道（非空即弹出 ConfirmDialog）。用项目统一的 ConfirmDialog 而非
++  // window.confirm——后者在 Tauri WebView（尤其 Linux WebKitGTK）行为不一致且样式脱离主题。
++  const [deleteTarget, setDeleteTarget] = useState<UniversalProvider | null>(
++    null,
++  );
 +
 +  // 绑定表单（接口地址内置为 BUILTIN_NEWAPI_BASE_URL，不暴露给用户）
 +  const [apiKey, setApiKey] = useState("");
@@ -231,6 +239,35 @@ index 00000000..d3b2eda7
 +    [t],
 +  );
 +
++  // [ccs] 请求删除：仅打开确认框（KeyCard 删除按钮点击 → 此处）。真正删除在 confirmDelete。
++  const requestDelete = useCallback((provider: UniversalProvider) => {
++    setDeleteTarget(provider);
++  }, []);
++
++  // [ccs] 确认删除：从存储移除该 newapi 渠道（delete_universal_provider），成功后刷新列表。
++  // 删除只移除渠道记录，不回收已铺开到各 CLI 的现存配置（与 upstream 删除语义一致）。
++  const confirmDelete = useCallback(async () => {
++    if (!deleteTarget) return;
++    const provider = deleteTarget;
++    try {
++      setDeletingId(provider.id);
++      await universalProvidersApi.delete(provider.id);
++      toast.success(t("account.deleteSuccess", { defaultValue: "已删除账户" }));
++      await load();
++    } catch (error) {
++      const message = error instanceof Error ? error.message : String(error);
++      toast.error(
++        t("account.deleteError", {
++          defaultValue: "删除失败：{{error}}",
++          error: message,
++        }),
++      );
++    } finally {
++      setDeletingId(null);
++      setDeleteTarget(null);
++    }
++  }, [deleteTarget, load, t]);
++
 +  return (
 +    <div className="space-y-4">
 +      {/* 绑定新账户表单 */}
@@ -311,26 +348,48 @@ index 00000000..d3b2eda7
 +          })}
 +        </div>
 +      ) : (
-+        <div className="grid gap-3 sm:grid-cols-2">
++        <div className="space-y-3">
 +          {newapiProviders.map((provider) => (
 +            <KeyCard
 +              key={provider.id}
 +              provider={provider}
 +              onImport={handleReapply}
 +              importing={reapplyingId === provider.id}
++              onDelete={requestDelete}
++              deleting={deletingId === provider.id}
 +            />
 +          ))}
 +        </div>
 +      )}
++
++      {/* [ccs] 删除确认：复用项目统一 ConfirmDialog（危险色 + 警告图标）。
++          嵌套在账户面板 Dialog 内，zIndex=alert(z-60) 高于账户面板(z-40)；ESC 只关本框、
++          点外部不关（dialog.tsx 默认），确认/取消二选一。避免 window.confirm 在 Tauri
++          WebView（尤其 Linux WebKitGTK）上样式突兀 / 行为不一致的问题。 */}
++      <ConfirmDialog
++        isOpen={deleteTarget !== null}
++        title={t("account.deleteConfirmTitle", { defaultValue: "删除账户" })}
++        message={t("account.deleteConfirm", {
++          defaultValue: "确定删除账户「{{name}}」？此操作不可撤销。",
++          name:
++            deleteTarget?.name.trim() ||
++            t("account.unnamedKey", { defaultValue: "未命名 key" }),
++        })}
++        confirmText={t("common.delete", { defaultValue: "删除" })}
++        cancelText={t("common.cancel", { defaultValue: "取消" })}
++        variant="destructive"
++        onConfirm={confirmDelete}
++        onCancel={() => setDeleteTarget(null)}
++      />
 +    </div>
 +  );
 +}
 diff --git a/src/components/account/KeyCard.tsx b/src/components/account/KeyCard.tsx
 new file mode 100644
-index 00000000..8f363c52
+index 00000000..c4f566e5
 --- /dev/null
 +++ b/src/components/account/KeyCard.tsx
-@@ -0,0 +1,203 @@
+@@ -0,0 +1,227 @@
 +// [ccs] 账户面板里的单个 key 卡片。
 +//
 +// cc-switch 里「一个 new-api key」= 一条 providerType:"newapi" 的 UniversalProvider。
@@ -342,7 +401,7 @@ index 00000000..8f363c52
 +//
 +// 换算/打码/使用率全走 03 的 format.ts 纯函数（与 open-code 同源）。key 明文绝不整段渲染。
 +
-+import { RefreshCw } from "lucide-react";
++import { RefreshCw, Trash2 } from "lucide-react";
 +import { useTranslation } from "react-i18next";
 +import { Card, CardContent } from "@/components/ui/card";
 +import { Badge } from "@/components/ui/badge";
@@ -365,9 +424,18 @@ index 00000000..8f363c52
 +  // 重新铺开到各 CLI（补丁 05 接线）。可选：未接线时按钮不渲染。
 +  onImport?: (provider: UniversalProvider) => void;
 +  importing?: boolean;
++  // [ccs] 删除该渠道（含二次确认，见 AccountPanel.handleDelete）。可选：未接线时按钮不渲染。
++  onDelete?: (provider: UniversalProvider) => void;
++  deleting?: boolean;
 +}
 +
-+export function KeyCard({ provider, onImport, importing }: KeyCardProps) {
++export function KeyCard({
++  provider,
++  onImport,
++  importing,
++  onDelete,
++  deleting,
++}: KeyCardProps) {
 +  const { t } = useTranslation();
 +  const { data, isFetching, isError, refetch } = useAccountProfile({
 +    keyId: provider.id,
@@ -428,17 +496,32 @@ index 00000000..8f363c52
 +              </span>
 +            </div>
 +          </div>
-+          <Button
-+            variant="ghost"
-+            size="icon"
-+            onClick={() => refetch()}
-+            title={t("account.refresh", { defaultValue: "刷新" })}
-+            disabled={isFetching}
-+          >
-+            <RefreshCw
-+              className={`w-4 h-4 ${isFetching ? "animate-spin" : ""}`}
-+            />
-+          </Button>
++          <div className="flex items-center gap-1 flex-shrink-0">
++            <Button
++              variant="ghost"
++              size="icon"
++              onClick={() => refetch()}
++              title={t("account.refresh", { defaultValue: "刷新" })}
++              disabled={isFetching}
++            >
++              <RefreshCw
++                className={`w-4 h-4 ${isFetching ? "animate-spin" : ""}`}
++              />
++            </Button>
++            {/* [ccs] 删除该渠道（含二次确认，见 AccountPanel.handleDelete）。 */}
++            {onDelete && (
++              <Button
++                variant="ghost"
++                size="icon"
++                onClick={() => onDelete(provider)}
++                title={t("common.delete", { defaultValue: "删除" })}
++                disabled={deleting}
++                className="text-destructive hover:text-destructive hover:bg-destructive/10"
++              >
++                <Trash2 className="w-4 h-4" />
++              </Button>
++            )}
++          </div>
 +        </div>
 +
 +        {/* 错误态 */}
