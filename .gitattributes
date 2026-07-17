@@ -1,0 +1,9 @@
+# 补丁文件必须逐字节保持仓库内的 LF：Windows runner 默认 core.autocrlf=true 会在
+# checkout 时把 *.patch 转成 CRLF，而 upstream/ submodule 的 .gitattributes 强制
+# *.json 等为 LF —— strict `git apply`（scripts/apply-patches.sh 的 apply 模式，不带
+# --3way）遇 CRLF 补丁 vs LF 目标即报 "patch does not apply"（仅 Windows 出包 job 挂）。
+# -text = 不做任何行尾转换，checkout 出来与仓库一致（LF）。
+*.patch -text
+
+# 品牌层的 shell 脚本同样锁 LF，避免 Windows checkout 引入 CRLF 破坏 bash 执行。
+*.sh    text eol=lf
