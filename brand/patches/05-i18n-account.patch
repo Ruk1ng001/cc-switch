@@ -11,10 +11,10 @@
 #   - src/i18n/locales/ja.json
 #
 diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
-index 4dd0b9a6..a6810aa6 100644
+index 4dd0b9a6..4874e616 100644
 --- a/src/i18n/locales/en.json
 +++ b/src/i18n/locales/en.json
-@@ -1,4 +1,60 @@
+@@ -1,4 +1,63 @@
  {
 +  "account": {
 +    "title": "My Account",
@@ -57,7 +57,6 @@ index 4dd0b9a6..a6810aa6 100644
 +    "importToClis": "Deploy to apps",
 +    "importing": "Deploying…",
 +    "reapplySuccess": "Deployed and activated",
-+    "reapplyPartial": "Some apps failed to deploy: {{apps}}",
 +    "reapplyError": "Deploy failed: {{error}}",
 +    "applyTitle": "Deploy to apps",
 +    "applySubtitle": "Select the apps to write and activate. Only the selected apps are changed; others are untouched.",
@@ -70,16 +69,20 @@ index 4dd0b9a6..a6810aa6 100644
 +    "selectNone": "Select none",
 +    "selectInvert": "Invert",
 +    "selectedCount": "Selected {{count}} / {{total}}",
-+    "keyGroup": "Group"
++    "keyGroup": "Group",
++    "reapplyOneFailed": "{{app}} deployment failed: {{error}}",
++    "bindPartial": "Key saved, but {{count}} apps failed to add it",
++    "noTargetApps": "No supported apps are available. Enable an app in Settings first.",
++    "targetsLoading": "Loading app settings…"
 +  },
    "app": {
      "title": "CC Switch",
      "description": "All-in-One Assistant for Claude Code, Codex & Gemini CLI"
 diff --git a/src/i18n/locales/ja.json b/src/i18n/locales/ja.json
-index 94dfe2c5..3a2db07d 100644
+index 94dfe2c5..85da077f 100644
 --- a/src/i18n/locales/ja.json
 +++ b/src/i18n/locales/ja.json
-@@ -1,4 +1,60 @@
+@@ -1,4 +1,63 @@
  {
 +  "account": {
 +    "title": "マイアカウント",
@@ -122,7 +125,6 @@ index 94dfe2c5..3a2db07d 100644
 +    "importToClis": "各 CLI に展開",
 +    "importing": "展開中…",
 +    "reapplySuccess": "展開して有効化しました",
-+    "reapplyPartial": "一部のアプリで展開に失敗：{{apps}}",
 +    "reapplyError": "展開失敗：{{error}}",
 +    "applyTitle": "アプリに展開",
 +    "applySubtitle": "書き込んで有効化するアプリを選択してください。選択したアプリのみが変更され、他のアプリには影響しません。",
@@ -135,16 +137,20 @@ index 94dfe2c5..3a2db07d 100644
 +    "selectNone": "選択解除",
 +    "selectInvert": "選択反転",
 +    "selectedCount": "選択済み {{count}} / {{total}}",
-+    "keyGroup": "グループ"
++    "keyGroup": "グループ",
++    "reapplyOneFailed": "{{app}} への展開に失敗しました：{{error}}",
++    "bindPartial": "key は保存されましたが、{{count}} 個のアプリへの追加に失敗しました",
++    "noTargetApps": "展開可能なアプリがありません。設定で対応アプリを有効にしてください。",
++    "targetsLoading": "アプリ設定を読み込み中…"
 +  },
    "app": {
      "title": "CC Switch",
      "description": "Claude Code・Codex・Gemini CLI のためのオールインワンアシスタント"
 diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
-index 8cab77aa..6a25087f 100644
+index 8cab77aa..039b8871 100644
 --- a/src/i18n/locales/zh-TW.json
 +++ b/src/i18n/locales/zh-TW.json
-@@ -1,4 +1,60 @@
+@@ -1,4 +1,63 @@
  {
 +  "account": {
 +    "title": "我的帳戶",
@@ -187,7 +193,6 @@ index 8cab77aa..6a25087f 100644
 +    "importToClis": "鋪開到各 CLI",
 +    "importing": "鋪開中…",
 +    "reapplySuccess": "已鋪開並啟用",
-+    "reapplyPartial": "部分應用鋪開失敗：{{apps}}",
 +    "reapplyError": "鋪開失敗：{{error}}",
 +    "applyTitle": "鋪開到應用",
 +    "applySubtitle": "勾選要寫入並啟用的應用。僅選中的應用會被改動，其它應用不受影響。",
@@ -200,16 +205,20 @@ index 8cab77aa..6a25087f 100644
 +    "selectNone": "全不選",
 +    "selectInvert": "反選",
 +    "selectedCount": "已選 {{count}} / {{total}}",
-+    "keyGroup": "分組"
++    "keyGroup": "分組",
++    "reapplyOneFailed": "{{app}} 鋪開失敗：{{error}}",
++    "bindPartial": "key 已儲存，但 {{count}} 個應用加入列表失敗",
++    "noTargetApps": "沒有可鋪開的應用，請先在設定中啟用支援的應用",
++    "targetsLoading": "正在載入應用設定…"
 +  },
    "app": {
      "title": "CC Switch",
      "description": "Claude Code / Codex / Gemini CLI 全方位輔助工具"
 diff --git a/src/i18n/locales/zh.json b/src/i18n/locales/zh.json
-index b0f60dd3..3b6f3cf9 100644
+index b0f60dd3..964a23b2 100644
 --- a/src/i18n/locales/zh.json
 +++ b/src/i18n/locales/zh.json
-@@ -1,4 +1,60 @@
+@@ -1,4 +1,63 @@
  {
 +  "account": {
 +    "title": "我的账户",
@@ -252,7 +261,6 @@ index b0f60dd3..3b6f3cf9 100644
 +    "importToClis": "铺开到各 CLI",
 +    "importing": "铺开中…",
 +    "reapplySuccess": "已铺开并激活",
-+    "reapplyPartial": "部分应用铺开失败：{{apps}}",
 +    "reapplyError": "铺开失败：{{error}}",
 +    "applyTitle": "铺开到应用",
 +    "applySubtitle": "勾选要写入并激活的应用。仅选中的应用会被改动，其它应用不受影响。",
@@ -265,7 +273,11 @@ index b0f60dd3..3b6f3cf9 100644
 +    "selectNone": "全不选",
 +    "selectInvert": "反选",
 +    "selectedCount": "已选 {{count}} / {{total}}",
-+    "keyGroup": "分组"
++    "keyGroup": "分组",
++    "reapplyOneFailed": "{{app}} 铺开失败：{{error}}",
++    "bindPartial": "key 已保存，但 {{count}} 个应用加入列表失败",
++    "noTargetApps": "没有可铺开的应用，请先在设置中启用支持的应用",
++    "targetsLoading": "正在加载应用设置…"
 +  },
    "app": {
      "title": "CC Switch",

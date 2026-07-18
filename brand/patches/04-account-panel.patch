@@ -91,10 +91,10 @@ index 645f1002..80bb846d 100644
  }
 diff --git a/src/components/account/AccountPanel.tsx b/src/components/account/AccountPanel.tsx
 new file mode 100644
-index 00000000..c4e466cb
+index 00000000..d4bdf689
 --- /dev/null
 +++ b/src/components/account/AccountPanel.tsx
-@@ -0,0 +1,747 @@
+@@ -0,0 +1,813 @@
 +// [ccs] 账户面板容器（对齐 open-code 完整版：固定头部 + 固定账户概览 + 独立滚动 key 列表 + 底部新增）。
 +//
 +// 列出所有 providerType:"newapi" 的 UniversalProvider（= 一个个 Dokng key），逐个渲染 KeyCard
@@ -109,7 +109,7 @@ index 00000000..c4e466cb
 +// 头部/账户概览/底部固定不滚动；右上角自带关闭 X。Dialog 尺寸在 App.tsx 用 min() 约束（点 5）。
 +// 样式全走项目 UI 基元与主题变量（点 6）。
 +
-+import { useCallback, useEffect, useState } from "react";
++import { useCallback, useEffect, useMemo, useState } from "react";
 +import { useTranslation } from "react-i18next";
 +import { useQueryClient } from "@tanstack/react-query";
 +import { Plus, RefreshCw, LayoutDashboard, Wallet, X } from "lucide-react";
@@ -128,13 +128,9 @@ index 00000000..c4e466cb
 +} from "@/components/ui/dialog";
 +import { ConfirmDialog } from "@/components/ConfirmDialog";
 +import { Checkbox } from "@/components/ui/checkbox";
-+import { universalProvidersApi, settingsApi } from "@/lib/api";
++import { universalProvidersApi, providersApi, settingsApi } from "@/lib/api";
 +import type { AppId } from "@/lib/api/types";
-+import type {
-+  UniversalProvider,
-+  UniversalProvidersMap,
-+  VisibleApps,
-+} from "@/types";
++import type { UniversalProvider, UniversalProvidersMap } from "@/types";
 +import { useSettingsQuery } from "@/lib/query";
 +import { KeyCard } from "./KeyCard";
 +import { useAccountProfile, accountKeys } from "./useAccountProfile";
@@ -168,8 +164,36 @@ index 00000000..c4e466cb
 +  const { t } = useTranslation();
 +  const queryClient = useQueryClient();
 +  // [ccs] 用户当前可见的应用集合。绑定/铺开只针对可见 app，避免向未装/已隐藏的应用写入。
-+  const { data: settingsData } = useSettingsQuery();
++  const { data: settingsData, isLoading: settingsLoading } = useSettingsQuery();
 +  const visibleApps = settingsData?.visibleApps;
++  const [claudeDesktopSupported, setClaudeDesktopSupported] = useState<
++    boolean | undefined
++  >(undefined);
++
++  useEffect(() => {
++    let cancelled = false;
++    providersApi
++      .getClaudeDesktopStatus()
++      .then((status) => {
++        if (!cancelled) setClaudeDesktopSupported(status.supported);
++      })
++      .catch(() => {
++        // 查询失败时按不支持处理，宁可不展示也不要让 Linux/未知平台铺开后确定失败。
++        if (!cancelled) setClaudeDesktopSupported(false);
++      });
++    return () => {
++      cancelled = true;
++    };
++  }, []);
++
++  const targetsReady = !settingsLoading && visibleApps !== undefined;
++  const targetApps = useMemo(
++    () =>
++      targetsReady
++        ? resolveTargetApps(visibleApps, { claudeDesktopSupported })
++        : [],
++    [targetsReady, visibleApps, claudeDesktopSupported],
++  );
 +
 +  const [providers, setProviders] = useState<UniversalProvidersMap>({});
 +  const [loading, setLoading] = useState(true);
@@ -242,12 +266,18 @@ index 00000000..c4e466cb
 +          // 逐个失败 app 单独弹一条错误，带上具体原因（后端返回的 error），
 +          // 便于定位「某应用为何铺开失败」——不再只显示 app 名而吞掉错误细节。
 +          for (const r of failed) {
++            const appName = t(`apps.${r.app}`, { defaultValue: r.app });
++            const errorText = r.error ?? "未知错误";
 +            toast.error(
 +              t("account.reapplyOneFailed", {
 +                defaultValue: "{{app}} 铺开失败：{{error}}",
-+                app: t(`apps.${r.app}`, { defaultValue: r.app }),
-+                error: r.error ?? "未知错误",
++                app: appName,
++                error: errorText,
 +              }),
++              {
++                description: `${appName}: ${errorText}`,
++                duration: 12000,
++              },
 +            );
 +          }
 +        }
@@ -414,7 +444,16 @@ index 00000000..c4e466cb
 +
 +      {/* ── 固定底部：新增账户（点 3，弹嵌套 Dialog）───────────────────── */}
 +      <div className="border-t border-border-default bg-muted/20 px-6 py-3 flex-shrink-0">
-+        <Button className="w-full" onClick={() => setAddOpen(true)}>
++        <Button
++          className="w-full"
++          onClick={() => setAddOpen(true)}
++          disabled={!targetsReady}
++          title={
++            targetsReady
++              ? undefined
++              : t("account.targetsLoading", { defaultValue: "正在加载应用设置…" })
++          }
++        >
 +          <Plus className="w-4 h-4 mr-1.5" />
 +          {t("account.addAccount", { defaultValue: "新增 key" })}
 +        </Button>
@@ -425,7 +464,7 @@ index 00000000..c4e466cb
 +        open={addOpen}
 +        onOpenChange={setAddOpen}
 +        onBound={load}
-+        visibleApps={visibleApps}
++        targetApps={targetApps}
 +      />
 +
 +      {/* [ccs] 删除确认：复用项目统一 ConfirmDialog（危险色 + 警告图标）。 */}
@@ -451,7 +490,7 @@ index 00000000..c4e466cb
 +        applying={reapplyingId !== null}
 +        onCancel={() => setApplyTarget(null)}
 +        onConfirm={confirmApply}
-+        visibleApps={visibleApps}
++        targetApps={targetApps}
 +      />
 +    </div>
 +  );
@@ -464,25 +503,23 @@ index 00000000..c4e466cb
 +  applying,
 +  onCancel,
 +  onConfirm,
-+  visibleApps,
++  targetApps,
 +}: {
 +  provider: UniversalProvider | null;
 +  applying: boolean;
 +  onCancel: () => void;
 +  onConfirm: (provider: UniversalProvider, apps: AppId[]) => void;
-+  visibleApps?: VisibleApps;
++  targetApps: AppId[];
 +}) {
 +  const { t } = useTranslation();
-+  // 只在可见 app 里选择：未装/隐藏的应用不出现在多选框，避免铺到用不到的 app。
-+  const targetApps = resolveTargetApps(visibleApps);
 +  const [selected, setSelected] = useState<Set<AppId>>(
 +    () => new Set(targetApps),
 +  );
 +
 +  // 每次打开重置为全选（按当前可见 app）。
 +  useEffect(() => {
-+    if (provider) setSelected(new Set(resolveTargetApps(visibleApps)));
-+  }, [provider, visibleApps]);
++    if (provider) setSelected(new Set(targetApps));
++  }, [provider, targetApps]);
 +
 +  const toggle = (app: AppId) => {
 +    setSelected((prev) => {
@@ -530,8 +567,16 @@ index 00000000..c4e466cb
 +          </DialogDescription>
 +        </DialogHeader>
 +        <div className="space-y-2 px-6 py-4">
-+          {/* [ccs] 快捷操作条：全选 / 全不选 / 反选。 */}
-+          <div className="flex items-center gap-2 pb-1">
++          {targetApps.length === 0 ? (
++            <div className="py-6 text-center text-sm text-muted-foreground">
++              {t("account.noTargetApps", {
++                defaultValue: "没有可铺开的应用，请先在设置中启用支持的应用",
++              })}
++            </div>
++          ) : (
++            <>
++              {/* [ccs] 快捷操作条：全选 / 全不选 / 反选。 */}
++              <div className="flex items-center gap-2 pb-1">
 +            <Button
 +              type="button"
 +              variant="ghost"
@@ -577,6 +622,8 @@ index 00000000..c4e466cb
 +              </span>
 +            </label>
 +          ))}
++            </>
++          )}
 +        </div>
 +        <DialogFooter>
 +          <Button variant="outline" onClick={onCancel} disabled={applying}>
@@ -716,12 +763,12 @@ index 00000000..c4e466cb
 +  open,
 +  onOpenChange,
 +  onBound,
-+  visibleApps,
++  targetApps,
 +}: {
 +  open: boolean;
 +  onOpenChange: (open: boolean) => void;
 +  onBound: () => void | Promise<void>;
-+  visibleApps?: VisibleApps;
++  targetApps: AppId[];
 +}) {
 +  const { t } = useTranslation();
 +  const [apiKey, setApiKey] = useState("");
@@ -744,17 +791,36 @@ index 00000000..c4e466cb
 +    }
 +    try {
 +      setBinding(true);
-+      await bindAccount({
++      const result = await bindAccount({
 +        baseUrl: BUILTIN_NEWAPI_BASE_URL,
 +        apiKey,
 +        name,
-+        visibleApps,
++        targetApps,
 +      });
-+      toast.success(
-+        t("account.bindSuccess", {
-+          defaultValue: "已绑定，可在卡片上「铺开到各 CLI」激活",
-+        }),
-+      );
++      const failed = result.applyResults.filter((r) => !r.ok);
++      if (failed.length === 0) {
++        toast.success(
++          t("account.bindSuccess", {
++            defaultValue: "已绑定 key，可在卡片上铺开并激活",
++          }),
++        );
++      } else {
++        toast.warning(
++          t("account.bindPartial", {
++            defaultValue: "key 已保存，但 {{count}} 个应用加入列表失败",
++            count: failed.length,
++          }),
++          {
++            description: failed
++              .map(
++                (r) =>
++                  `${t(`apps.${r.app}`, { defaultValue: r.app })}: ${r.error ?? "未知错误"}`,
++              )
++              .join("\n"),
++            duration: 12000,
++          },
++        );
++      }
 +      await onBound();
 +      onOpenChange(false);
 +    } catch (error) {
@@ -768,7 +834,7 @@ index 00000000..c4e466cb
 +    } finally {
 +      setBinding(false);
 +    }
-+  }, [apiKey, name, visibleApps, onBound, onOpenChange, t]);
++  }, [apiKey, name, targetApps, onBound, onOpenChange, t]);
 +
 +  return (
 +    <Dialog open={open} onOpenChange={onOpenChange}>
@@ -844,10 +910,10 @@ index 00000000..c4e466cb
 +}
 diff --git a/src/components/account/KeyCard.tsx b/src/components/account/KeyCard.tsx
 new file mode 100644
-index 00000000..55fd5cad
+index 00000000..04f0b014
 --- /dev/null
 +++ b/src/components/account/KeyCard.tsx
-@@ -0,0 +1,225 @@
+@@ -0,0 +1,235 @@
 +// [ccs] 账户面板里的单个 key 卡片。
 +//
 +// cc-switch 里「一个 Dokng key」= 一条 providerType:"newapi" 的 UniversalProvider。
@@ -904,8 +970,16 @@ index 00000000..55fd5cad
 +  });
 +
 +  const profile = data?.ok ? data.profile : undefined;
-+  // 展示名：Dokng · <渠道名>。渠道名取本地 name，空则退回远端 token.Name。
-+  const rawName = provider.name.trim() || profile?.tokenName?.trim() || "";
++  // 展示名：存量 `NewAPI` / 空 / 已带 Dokng 前缀时优先远端 token.Name；避免
++  // `Dokng · NewAPI` 和 `Dokng · Dokng · xxx`。用户明确填写的本地名仍优先。
++  const storedName = provider.name.trim();
++  const shouldPreferRemote =
++    !storedName ||
++    storedName.toLowerCase() === "newapi" ||
++    /^dokng\s*·/i.test(storedName);
++  const rawName = shouldPreferRemote
++    ? profile?.tokenName?.trim() || storedName
++    : storedName;
 +  const displayName = dokngDisplayName(rawName);
 +
 +  const errorText =
@@ -924,17 +998,19 @@ index 00000000..55fd5cad
 +        <div className="flex items-start justify-between gap-3">
 +          <div className="flex items-center gap-3 min-w-0">
 +            <ProviderIcon icon="dokng" name={displayName} size={28} />
-+            <div className="min-w-0">
-+              <div className="flex items-center gap-2">
-+                <span className="font-medium truncate">{displayName}</span>
++            <div className="min-w-0 flex-1">
++              {/* 名称独占一行；徽标另起可换行，避免长 key 名 + 分组/状态挤出卡片。 */}
++              <div className="font-medium truncate" title={displayName}>
++                {displayName}
++              </div>
++              <div className="mt-1 flex flex-wrap items-center gap-1.5">
 +                {statusLabel && (
 +                  <Badge variant="destructive">{statusLabel}</Badge>
 +                )}
 +                {/* [ccs] key 所属分组（profile.keyGroup，来自 Dokng 侧定价分组）。空则不显示。 */}
 +                {profile?.keyGroup && (
-+                  <Badge variant="outline" className="flex-shrink-0">
-+                    {t("account.keyGroup", { defaultValue: "分组" })}:{" "}
-+                    {profile.keyGroup}
++                  <Badge variant="outline">
++                    {t("account.keyGroup", { defaultValue: "分组" })}: {profile.keyGroup}
 +                  </Badge>
 +                )}
 +                {profile?.keyDynamicRatio && (
@@ -952,9 +1028,9 @@ index 00000000..55fd5cad
 +                  </Badge>
 +                )}
 +              </div>
-+              <span className="text-xs text-muted-foreground font-mono">
++              <div className="mt-1 truncate text-xs text-muted-foreground font-mono">
 +                {maskKey(provider.apiKey)}
-+              </span>
++              </div>
 +            </div>
 +          </div>
 +          <div className="flex items-center gap-1 flex-shrink-0">
@@ -1075,10 +1151,10 @@ index 00000000..55fd5cad
 +}
 diff --git a/src/components/account/importKey.ts b/src/components/account/importKey.ts
 new file mode 100644
-index 00000000..6497c156
+index 00000000..d9d9fed3
 --- /dev/null
 +++ b/src/components/account/importKey.ts
-@@ -0,0 +1,359 @@
+@@ -0,0 +1,420 @@
 +// [ccs] Dokng 账户「铺开到各 CLI」逻辑。
 +//
 +// cc-switch 里「一个 Dokng key」= 一条 providerType:"newapi" 的 UniversalProvider。
@@ -1122,12 +1198,21 @@ index 00000000..6497c156
 +  "hermes",
 +];
 +
-+// [ccs] 按 visibleApps 过滤出实际在用的目标应用：只对用户没隐藏的 app 铺开/展示，
-+// 避免往未安装/已隐藏的应用（如没装的 Hermes）写记录污染其标签页。
-+// visibleApps 缺省（老配置未含该字段）时视为全部可见，退回全集。
-+export function resolveTargetApps(visibleApps?: VisibleApps): AppId[] {
-+  if (!visibleApps) return DOKNG_TARGET_APPS;
-+  return DOKNG_TARGET_APPS.filter((app) => visibleApps[app] !== false);
++// [ccs] 按 visibleApps 过滤出实际在用的目标应用，并排除平台不支持项。
++// 设置未加载时返回空集合，避免启动初期把 undefined 误当“全部可见”而污染隐藏 app。
++export function resolveTargetApps(
++  visibleApps: VisibleApps | undefined,
++  options?: { claudeDesktopSupported?: boolean },
++): AppId[] {
++  // 设置尚未加载时返回空集合：不能把 undefined 当成“全部可见”，否则启动初期可能污染隐藏 app。
++  if (!visibleApps) return [];
++  return DOKNG_TARGET_APPS.filter((app) => {
++    if (visibleApps[app] === false) return false;
++    if (app === "claude-desktop" && options?.claudeDesktopSupported === false) {
++      return false;
++    }
++    return true;
++  });
 +}
 +
 +// [ccs] 各 app 默认模型：沿用 universalProviderPresets 的 NEWAPI 默认值，保持与既有假设一致。
@@ -1145,7 +1230,29 @@ index 00000000..6497c156
 +// 账户面板卡片与铺开到各 app 后的供应商名都走它。
 +export function dokngDisplayName(rawName: string | undefined | null): string {
 +  const n = (rawName ?? "").trim();
-+  return n ? `Dokng · ${n}` : "Dokng";
++  if (!n || n.toLowerCase() === "newapi") return "Dokng";
++  if (/^dokng\s*·\s*/i.test(n)) return n.replace(/^dokng\s*·\s*/i, "Dokng · ");
++  return `Dokng · ${n}`;
++}
++
++// TOML 基本字符串与 JSON 字符串的转义规则对常见 URL/model/name 兼容；复用 JSON.stringify
++// 生成可靠双引号字面量，避免动态值中的引号/反斜杠/换行破坏 config.toml。
++function tomlString(value: string): string {
++  return JSON.stringify(value);
++}
++
++function validateCredentials(baseUrl: string, apiKey: string): void {
++  let parsed: URL;
++  try {
++    parsed = new URL(baseUrl);
++  } catch {
++    throw new Error(`无效的上游地址: ${baseUrl}`);
++  }
++  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
++    throw new Error(`上游地址只支持 http/https: ${baseUrl}`);
++  }
++  if (!parsed.hostname) throw new Error(`上游地址缺少主机名: ${baseUrl}`);
++  if (!apiKey.trim()) throw new Error("API Key 不能为空");
 +}
 +
 +// [ccs] additive 类应用：add 时 addToLive 直接决定写 live，无「当前供应商」概念。
@@ -1228,15 +1335,15 @@ index 00000000..6497c156
 +    case "codex": {
 +      const cbase = codexBaseUrl(baseUrl);
 +      const configToml = [
-+        `model_provider = "custom"`,
-+        `model = "${MODELS.codex}"`,
-+        `model_reasoning_effort = "${MODELS.codexEffort}"`,
++        `model_provider = ${tomlString("custom")}`,
++        `model = ${tomlString(MODELS.codex)}`,
++        `model_reasoning_effort = ${tomlString(MODELS.codexEffort)}`,
 +        `disable_response_storage = true`,
 +        ``,
 +        `[model_providers.custom]`,
-+        `name = "Dokng"`,
-+        `base_url = "${cbase}"`,
-+        `wire_api = "responses"`,
++        `name = ${tomlString("Dokng")}`,
++        `base_url = ${tomlString(cbase)}`,
++        `wire_api = ${tomlString("responses")}`,
 +        `requires_openai_auth = true`,
 +      ].join("\n");
 +      return {
@@ -1311,34 +1418,50 @@ index 00000000..6497c156
 +  error?: string;
 +}
 +
++export interface ApplyAccountOptions {
++  activate: boolean;
++  // 远端 profile 的真实 token.Name；用于修复存量 provider.name="NewAPI" 并铺开真实名。
++  tokenName?: string;
++}
++
++async function pinProviderFirst(app: AppId, childId: string): Promise<void> {
++  const providers = await providersApi.getAll(app);
++  const ordered = Object.values(providers)
++    .filter((p) => p.id !== childId)
++    .sort((a, b) => {
++      const ai = typeof a.sortIndex === "number" ? a.sortIndex : Number.MAX_SAFE_INTEGER;
++      const bi = typeof b.sortIndex === "number" ? b.sortIndex : Number.MAX_SAFE_INTEGER;
++      if (ai !== bi) return ai - bi;
++      return (a.createdAt ?? 0) - (b.createdAt ?? 0);
++    });
++  await providersApi.updateSortOrder(
++    [{ id: childId, sortIndex: 0 }, ...ordered.map((p, index) => ({ id: p.id, sortIndex: index + 1 }))],
++    app,
++  );
++}
++
 +// [ccs] 把一条 Dokng 账户铺到指定应用列表。activate=true 时激活（switch 类设为当前、
 +// additive 类写 live）；false 时仅加进列表不激活。逐 app 独立捕获错误，互不影响。
 +export async function applyAccountToApps(
 +  provider: UniversalProvider,
 +  apps: AppId[],
-+  options: { activate: boolean },
++  options: ApplyAccountOptions,
 +): Promise<ApplyAppResult[]> {
-+  const displayName = dokngDisplayName(provider.name);
++  validateCredentials(provider.baseUrl, provider.apiKey);
++  const storedName = provider.name.trim();
++  const tokenName = options.tokenName?.trim();
++  const rawName = !storedName || storedName.toLowerCase() === "newapi" || /^dokng\s*·/i.test(storedName)
++    ? tokenName || storedName
++    : storedName;
++  const displayName = dokngDisplayName(rawName);
 +  const results: ApplyAppResult[] = [];
 +
 +  for (const app of apps) {
 +    try {
-+      // 置顶排序：
-+      //   - 若该 Dokng 子供应商已存在（重复铺开），复用它现有的 sortIndex——不再往前累减，
-+      //     避免每次铺开数值无限变小（漂移）。
-+      //   - 仅首次铺开（列表里还没有它）时，取现有最小 sortIndex - 1 置顶为第一个。
++      // sortIndex 在 Rust 里是 usize，绝不能发送 -1。新建/更新都先用非负 0，add 成功后再
++      // 通过 updateSortOrder 把 Dokng 固定为 0、其余归一化为 1..N（幂等且真正置顶）。
 +      const childId = `dokng-${app}-${provider.id}`;
-+      const existing = await providersApi.getAll(app);
-+      const self = existing[childId];
-+      let topIndex: number;
-+      if (self && typeof self.sortIndex === "number") {
-+        topIndex = self.sortIndex;
-+      } else {
-+        const indices = Object.values(existing)
-+          .map((p) => p.sortIndex)
-+          .filter((i): i is number => typeof i === "number");
-+        topIndex = indices.length ? Math.min(...indices) - 1 : 0;
-+      }
++      const topIndex = 0;
 +
 +      const appProvider = buildProviderForApp(app, {
 +        universalId: provider.id,
@@ -1352,9 +1475,12 @@ index 00000000..6497c156
 +      //   step="add"    additive 类由 addToLive=activate 决定是否写 live；switch 类仅在无当前时自动激活。
 +      //                 save_provider 对已存在 id 覆盖，故重复铺开幂等。
 +      //   step="switch" switch 类显式激活时设为当前（会替换当前选择——仅对用户勾选的 app 生效）。
-+      let step: "add" | "switch" = "add";
++      let step: "add" | "sort" | "switch" = "add";
 +      try {
 +        await providersApi.add(appProvider, app, options.activate);
++
++        step = "sort";
++        await pinProviderFirst(app, childId);
 +
 +        if (options.activate && !isAdditiveApp(app)) {
 +          step = "switch";
@@ -1383,8 +1509,13 @@ index 00000000..6497c156
 +  apiKey: string;
 +  // 渠道展示名（可选）。存进 UniversalProvider.name 的原始值；显示/铺开时再加 Dokng 前缀。
 +  name?: string;
-+  // 用户当前可见的应用（settings.visibleApps）。仅向可见 app 铺开，避免污染未装应用的列表。
-+  visibleApps?: VisibleApps;
++  // 已解析好的目标应用：由 UI 等设置加载和平台能力查询完成后传入，避免 undefined 回退全 7 app。
++  targetApps: AppId[];
++}
++
++export interface BindAccountResult {
++  provider: UniversalProvider;
++  applyResults: ApplyAppResult[];
 +}
 +
 +// [ccs] 绑定新账户：建一条 newapi UniversalProvider（覆盖 Dokng 官网/图标），upsert 存盘，
@@ -1393,8 +1524,8 @@ index 00000000..6497c156
 +  baseUrl,
 +  apiKey,
 +  name,
-+  visibleApps,
-+}: BindAccountArgs): Promise<UniversalProvider> {
++  targetApps,
++}: BindAccountArgs): Promise<BindAccountResult> {
 +  const preset = findPresetByType("newapi");
 +  if (!preset) {
 +    throw new Error("缺少 NewAPI 预设，无法绑定账户");
@@ -1402,6 +1533,8 @@ index 00000000..6497c156
 +
 +  const trimmedBaseUrl = baseUrl.trim().replace(/\/+$/, "");
 +  const trimmedApiKey = apiKey.trim();
++
++  validateCredentials(trimmedBaseUrl, trimmedApiKey);
 +
 +  // 渠道名优先用用户填写的；没填则拉一次 profile 用远端 token.Name（即该 key 在 Dokng 侧的名字），
 +  // 保证卡片/铺开展示的是「Dokng · <这个 key 的真实名字>」而非预设名「NewAPI」。
@@ -1421,8 +1554,11 @@ index 00000000..6497c156
 +    generateUUID(),
 +    trimmedBaseUrl,
 +    trimmedApiKey,
++    // 明确传入空字符串也会被 upstream 工厂的 `customName || preset.name` 变回 NewAPI，
++    // 因此创建后再覆盖 name，确保 profile 暂时失败时也不把预设名当成真实 key 名。
 +    resolvedName || undefined,
 +  );
++  provider.name = resolvedName || "";
 +  // 覆盖为 Dokng 品牌：官网指向自建站点、图标用 Dokng logo。
 +  provider.websiteUrl = DOKNG_WEBSITE_URL;
 +  provider.icon = DOKNG_ICON;
@@ -1432,11 +1568,12 @@ index 00000000..6497c156
 +    throw new Error("保存渠道失败");
 +  }
 +
-+  // 铺到「可见」的 app 列表（不激活）；单个 app 失败不阻断其余，交由调用方按需提示。
-+  await applyAccountToApps(provider, resolveTargetApps(visibleApps), {
++  // 铺到已解析的可用 app 列表（不激活）；返回逐 app 结果，由 UI 明确提示部分失败。
++  const applyResults = await applyAccountToApps(provider, targetApps, {
 +    activate: false,
++    tokenName: resolvedName,
 +  });
-+  return provider;
++  return { provider, applyResults };
 +}
 diff --git a/src/components/account/useAccountProfile.ts b/src/components/account/useAccountProfile.ts
 new file mode 100644
