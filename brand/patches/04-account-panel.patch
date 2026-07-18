@@ -22,7 +22,7 @@
 # 应用（在 upstream/ 内，基线为 brand/BASE_SHA）：
 #   git -C upstream apply brand/patches/04-account-panel.patch
 diff --git a/src/App.tsx b/src/App.tsx
-index 645f1002..edcfb677 100644
+index 645f1002..80bb846d 100644
 --- a/src/App.tsx
 +++ b/src/App.tsx
 @@ -25,6 +25,7 @@ import {
@@ -70,17 +70,19 @@ index 645f1002..edcfb677 100644
                  <UpdateBadge
                    onClick={() => {
                      setSettingsDefaultTab("about");
-@@ -1659,6 +1676,16 @@ function App() {
+@@ -1659,6 +1676,18 @@ function App() {
  
        <DeepLinkImportDialog />
        <FirstRunNoticeDialog />
 +
 +      {/* [ccs] 账户面板：列出本地 newapi 渠道 + 新增账户/一键铺开到各 CLI。
-+          尺寸固定为视口的响应式比例（min() 夹取），不随主窗口尺寸难看伸缩（点 5）：
-+          宽 min(42rem, 92vw)、高 min(40rem, 88vh)；面板内部自管固定头/滚动体/固定底布局。
++          位置/尺寸：固定顶栏（拖拽条 + header，共 contentTopOffset）盖在 base 层 Dialog 之上，
++          故不能按整窗垂直居中——否则小窗口下面板顶部（标题/控制台/充值/关闭）会被顶栏遮住。
++          改为「在顶栏下方的可用区内垂直居中」：top 取该区中心、maxHeight 扣掉顶栏高度，
++          面板顶边恒落在顶栏之下；高度 680 兜底，放不下时由内部 key 列表滚动区消化，内容看得全。
 +          p-0 去掉 DialogContent 默认内边距（面板各区自带 px-6）；面板自带关闭 X，故不用外层头部。 */}
 +      <Dialog open={accountPanelOpen} onOpenChange={setAccountPanelOpen}>
-+        <DialogContent className="w-[min(42rem,92vw)] max-w-none h-[min(40rem,88vh)] max-h-none p-0 gap-0 overflow-hidden">
++        <DialogContent className="w-[640px] max-w-[calc(100vw-2rem)] h-[680px] p-0 gap-0 overflow-hidden" style={{ top: `calc(${contentTopOffset}px / 2 + 50vh)`, maxHeight: `calc(100vh - ${contentTopOffset}px - 1rem)` }}>
 +          <AccountPanel onClose={() => setAccountPanelOpen(false)} />
 +        </DialogContent>
 +      </Dialog>
@@ -89,10 +91,10 @@ index 645f1002..edcfb677 100644
  }
 diff --git a/src/components/account/AccountPanel.tsx b/src/components/account/AccountPanel.tsx
 new file mode 100644
-index 00000000..8835801f
+index 00000000..01b47a33
 --- /dev/null
 +++ b/src/components/account/AccountPanel.tsx
-@@ -0,0 +1,536 @@
+@@ -0,0 +1,702 @@
 +// [ccs] 账户面板容器（对齐 open-code 完整版：固定头部 + 固定账户概览 + 独立滚动 key 列表 + 底部新增）。
 +//
 +// 列出所有 providerType:"newapi" 的 UniversalProvider（= 一个个 Dokng key），逐个渲染 KeyCard
@@ -125,11 +127,22 @@ index 00000000..8835801f
 +  DialogFooter,
 +} from "@/components/ui/dialog";
 +import { ConfirmDialog } from "@/components/ConfirmDialog";
++import { Checkbox } from "@/components/ui/checkbox";
 +import { universalProvidersApi, settingsApi } from "@/lib/api";
-+import type { UniversalProvider, UniversalProvidersMap } from "@/types";
++import type { AppId } from "@/lib/api/types";
++import type {
++  UniversalProvider,
++  UniversalProvidersMap,
++  VisibleApps,
++} from "@/types";
++import { useSettingsQuery } from "@/lib/query";
 +import { KeyCard } from "./KeyCard";
 +import { useAccountProfile, accountKeys } from "./useAccountProfile";
-+import { bindAccount, reapplyProvider } from "./importKey";
++import {
++  bindAccount,
++  applyAccountToApps,
++  resolveTargetApps,
++} from "./importKey";
 +import {
 +  formatCurrency,
 +  formatTokenCount,
@@ -154,11 +167,18 @@ index 00000000..8835801f
 +export function AccountPanel({ onClose }: AccountPanelProps) {
 +  const { t } = useTranslation();
 +  const queryClient = useQueryClient();
++  // [ccs] 用户当前可见的应用集合。绑定/铺开只针对可见 app，避免向未装/已隐藏的应用写入。
++  const { data: settingsData } = useSettingsQuery();
++  const visibleApps = settingsData?.visibleApps;
 +
 +  const [providers, setProviders] = useState<UniversalProvidersMap>({});
 +  const [loading, setLoading] = useState(true);
-+  // 正在「重新铺开」的渠道 id（禁用对应卡片按钮）。
++  // 正在「铺开」的渠道 id（禁用对应卡片按钮 + 多选框确认按钮）。
 +  const [reapplyingId, setReapplyingId] = useState<string | null>(null);
++  // [ccs] 待铺开的渠道（非空即弹出应用多选框；勾选确认后调 applyAccountToApps）。
++  const [applyTarget, setApplyTarget] = useState<UniversalProvider | null>(
++    null,
++  );
 +  // [ccs] 正在删除的渠道 id（禁用对应卡片删除按钮）。
 +  const [deletingId, setDeletingId] = useState<string | null>(null);
 +  // [ccs] 待确认删除的渠道（非空即弹出 ConfirmDialog）。
@@ -199,14 +219,33 @@ index 00000000..8835801f
 +  // [ccs] 账户概览取首个渠道的 profile（账户级余额/额度为账户维度，同账户各 key 同源）。
 +  const primaryProvider = newapiProviders[0];
 +
-+  const handleReapply = useCallback(
-+    async (provider: UniversalProvider) => {
++  // [ccs] 请求铺开：打开应用多选框（KeyCard「铺开到各 CLI」→ 此处）。真正铺开在 confirmApply。
++  const requestApply = useCallback((provider: UniversalProvider) => {
++    setApplyTarget(provider);
++  }, []);
++
++  // [ccs] 确认铺开：把该渠道铺到勾选的 app 并激活（switch 类设为当前、additive 类写 live）。
++  // 逐 app 独立捕获错误：全成功提示成功，部分失败列出失败的 app，不影响成功的部分。
++  const confirmApply = useCallback(
++    async (provider: UniversalProvider, apps: AppId[]) => {
 +      try {
 +        setReapplyingId(provider.id);
-+        await reapplyProvider(provider);
-+        toast.success(
-+          t("account.reapplySuccess", { defaultValue: "已重新铺开到各 CLI" }),
-+        );
++        const results = await applyAccountToApps(provider, apps, {
++          activate: true,
++        });
++        const failed = results.filter((r) => !r.ok);
++        if (failed.length === 0) {
++          toast.success(
++            t("account.reapplySuccess", { defaultValue: "已铺开并激活" }),
++          );
++        } else {
++          toast.error(
++            t("account.reapplyPartial", {
++              defaultValue: "部分应用铺开失败：{{apps}}",
++              apps: failed.map((r) => r.app).join(", "),
++            }),
++          );
++        }
 +      } catch (error) {
 +        const message = error instanceof Error ? error.message : String(error);
 +        toast.error(
@@ -217,6 +256,7 @@ index 00000000..8835801f
 +        );
 +      } finally {
 +        setReapplyingId(null);
++        setApplyTarget(null);
 +      }
 +    },
 +    [t],
@@ -286,7 +326,7 @@ index 00000000..8835801f
 +          </DialogTitle>
 +          <DialogDescription className="text-sm text-muted-foreground">
 +            {t("account.subtitle", {
-+              defaultValue: "管理 Dokng 账户，一键铺开到 Claude / Codex / Gemini",
++              defaultValue: "管理 Dokng 账户，一键铺开到各命令行工具",
 +            })}
 +          </DialogDescription>
 +        </div>
@@ -358,7 +398,7 @@ index 00000000..8835801f
 +            <KeyCard
 +              key={provider.id}
 +              provider={provider}
-+              onImport={handleReapply}
++              onImport={requestApply}
 +              importing={reapplyingId === provider.id}
 +              onDelete={requestDelete}
 +              deleting={deletingId === provider.id}
@@ -380,6 +420,7 @@ index 00000000..8835801f
 +        open={addOpen}
 +        onOpenChange={setAddOpen}
 +        onBound={load}
++        visibleApps={visibleApps}
 +      />
 +
 +      {/* [ccs] 删除确认：复用项目统一 ConfirmDialog（危险色 + 警告图标）。 */}
@@ -398,7 +439,117 @@ index 00000000..8835801f
 +        onConfirm={confirmDelete}
 +        onCancel={() => setDeleteTarget(null)}
 +      />
++
++      {/* [ccs] 铺开应用多选框：勾选要激活的 app（默认全选），确认后铺开并激活选中的 app。 */}
++      <ApplyDialog
++        provider={applyTarget}
++        applying={reapplyingId !== null}
++        onCancel={() => setApplyTarget(null)}
++        onConfirm={confirmApply}
++        visibleApps={visibleApps}
++      />
 +    </div>
++  );
++}
++
++// [ccs] 铺开应用多选框：仅列出「可见」的目标应用（settings.visibleApps 过滤后），用户勾选后
++// 铺开并激活选中的 app。默认全选；至少勾一个才能确认。app 显示名走 i18n（回退英文名）。
++function ApplyDialog({
++  provider,
++  applying,
++  onCancel,
++  onConfirm,
++  visibleApps,
++}: {
++  provider: UniversalProvider | null;
++  applying: boolean;
++  onCancel: () => void;
++  onConfirm: (provider: UniversalProvider, apps: AppId[]) => void;
++  visibleApps?: VisibleApps;
++}) {
++  const { t } = useTranslation();
++  // 只在可见 app 里选择：未装/隐藏的应用不出现在多选框，避免铺到用不到的 app。
++  const targetApps = resolveTargetApps(visibleApps);
++  const [selected, setSelected] = useState<Set<AppId>>(
++    () => new Set(targetApps),
++  );
++
++  // 每次打开重置为全选（按当前可见 app）。
++  useEffect(() => {
++    if (provider) setSelected(new Set(resolveTargetApps(visibleApps)));
++  }, [provider, visibleApps]);
++
++  const toggle = (app: AppId) => {
++    setSelected((prev) => {
++      const next = new Set(prev);
++      if (next.has(app)) next.delete(app);
++      else next.add(app);
++      return next;
++    });
++  };
++
++  return (
++    <Dialog
++      open={provider !== null}
++      onOpenChange={(open) => {
++        if (!open && !applying) onCancel();
++      }}
++    >
++      {/* [ccs] 顶栏避让：固定顶栏（拖拽条+header，最坏 96px）为 base 层但盖在 Dialog 之上，
++          小窗口下整窗居中会让 Dialog 顶部被遮。下移中心 + 限高，确保恒落在顶栏之下。 */}
++      <DialogContent
++        className="max-w-md overflow-y-auto"
++        zIndex="nested"
++        style={{
++          top: "calc(96px / 2 + 50vh)",
++          maxHeight: "calc(100vh - 96px - 1rem)",
++        }}
++      >
++        <DialogHeader>
++          <DialogTitle>
++            {t("account.applyTitle", { defaultValue: "铺开到应用" })}
++          </DialogTitle>
++          <DialogDescription>
++            {t("account.applySubtitle", {
++              defaultValue:
++                "勾选要写入并激活的应用。仅选中的应用会被改动，其它应用不受影响。",
++            })}
++          </DialogDescription>
++        </DialogHeader>
++        <div className="space-y-2 px-6 py-4">
++          {targetApps.map((app) => (
++            <label
++              key={app}
++              className="flex items-center gap-2.5 rounded-md px-2 py-1.5 hover:bg-muted/50 cursor-pointer"
++            >
++              <Checkbox
++                checked={selected.has(app)}
++                onCheckedChange={() => toggle(app)}
++                disabled={applying}
++              />
++              <span className="text-sm">
++                {t(`apps.${app}`, { defaultValue: app })}
++              </span>
++            </label>
++          ))}
++        </div>
++        <DialogFooter>
++          <Button variant="outline" onClick={onCancel} disabled={applying}>
++            {t("common.cancel", { defaultValue: "取消" })}
++          </Button>
++          <Button
++            onClick={() =>
++              provider && onConfirm(provider, Array.from(selected))
++            }
++            disabled={applying || selected.size === 0}
++          >
++            {applying
++              ? t("account.importing", { defaultValue: "铺开中…" })
++              : t("account.applyConfirm", { defaultValue: "铺开并激活" })}
++          </Button>
++        </DialogFooter>
++      </DialogContent>
++    </Dialog>
 +  );
 +}
 +
@@ -514,16 +665,18 @@ index 00000000..8835801f
 +}
 +
 +// [ccs] 新增账户嵌套 Dialog（点 3）。接口地址内置为 BUILTIN_NEWAPI_BASE_URL，不暴露给用户。
-+// 绑定 = bindAccount（用 NewAPI 预设组装一条 newapi 渠道 → upsert + sync 铺开到各 CLI）。
++// 绑定 = bindAccount：建一条 newapi 渠道 → upsert 存盘 → 加进「可见」app 的列表（不激活）。
 +// zIndex=nested（z-50）覆于账户面板（z-40）之上；成功后回调 onBound 刷新父列表并自关。
 +function AddAccountDialog({
 +  open,
 +  onOpenChange,
 +  onBound,
++  visibleApps,
 +}: {
 +  open: boolean;
 +  onOpenChange: (open: boolean) => void;
 +  onBound: () => void | Promise<void>;
++  visibleApps?: VisibleApps;
 +}) {
 +  const { t } = useTranslation();
 +  const [apiKey, setApiKey] = useState("");
@@ -546,9 +699,16 @@ index 00000000..8835801f
 +    }
 +    try {
 +      setBinding(true);
-+      await bindAccount({ baseUrl: BUILTIN_NEWAPI_BASE_URL, apiKey, name });
++      await bindAccount({
++        baseUrl: BUILTIN_NEWAPI_BASE_URL,
++        apiKey,
++        name,
++        visibleApps,
++      });
 +      toast.success(
-+        t("account.bindSuccess", { defaultValue: "已绑定并铺开到各 CLI" }),
++        t("account.bindSuccess", {
++          defaultValue: "已绑定，可在卡片上「铺开到各 CLI」激活",
++        }),
 +      );
 +      await onBound();
 +      onOpenChange(false);
@@ -563,18 +723,26 @@ index 00000000..8835801f
 +    } finally {
 +      setBinding(false);
 +    }
-+  }, [apiKey, name, onBound, onOpenChange, t]);
++  }, [apiKey, name, visibleApps, onBound, onOpenChange, t]);
 +
 +  return (
 +    <Dialog open={open} onOpenChange={onOpenChange}>
-+      <DialogContent className="max-w-md" zIndex="nested">
++      <DialogContent
++        className="max-w-md"
++        zIndex="nested"
++        style={{
++          top: "calc(96px / 2 + 50vh)",
++          maxHeight: "calc(100vh - 96px - 1rem)",
++        }}
++      >
 +        <DialogHeader>
 +          <DialogTitle>
 +            {t("account.addAccount", { defaultValue: "新增账户" })}
 +          </DialogTitle>
 +          <DialogDescription>
 +            {t("account.addSubtitle", {
-+              defaultValue: "粘贴 Dokng API Key 绑定账户，绑定后自动铺开到各 CLI",
++              defaultValue:
++                "粘贴 Dokng API Key 绑定账户，绑定后在卡片上「铺开到各 CLI」即可激活",
 +            })}
 +          </DialogDescription>
 +        </DialogHeader>
@@ -622,7 +790,7 @@ index 00000000..8835801f
 +          <Button onClick={handleBind} disabled={binding}>
 +            {binding
 +              ? t("account.binding", { defaultValue: "绑定中…" })
-+              : t("account.bind", { defaultValue: "绑定并铺开" })}
++              : t("account.bind", { defaultValue: "绑定账户" })}
 +          </Button>
 +        </DialogFooter>
 +      </DialogContent>
@@ -631,18 +799,18 @@ index 00000000..8835801f
 +}
 diff --git a/src/components/account/KeyCard.tsx b/src/components/account/KeyCard.tsx
 new file mode 100644
-index 00000000..c1f9cd98
+index 00000000..7cc370e2
 --- /dev/null
 +++ b/src/components/account/KeyCard.tsx
-@@ -0,0 +1,221 @@
+@@ -0,0 +1,218 @@
 +// [ccs] 账户面板里的单个 key 卡片。
 +//
-+// cc-switch 里「一个 new-api key」= 一条 providerType:"newapi" 的 UniversalProvider。
++// cc-switch 里「一个 Dokng key」= 一条 providerType:"newapi" 的 UniversalProvider。
 +// 本卡片拿单条渠道的 {baseUrl, apiKey} 调 useAccountProfile 拉 profile，展示：
-+//   - key 打码 + 展示名（本地 name 优先，空则用远端 token.Name）；
++//   - key 打码 + 展示名（Dokng · 渠道名）；
 +//   - 账户余额 / 今日用量 / 当前 key 额度（unlimited 时显示「额度不限」）；
 +//   - 状态徽标（禁用/过期/耗尽）、过期告警、动态倍率；
-+//   - 「重新铺开到 Claude/Codex/Gemini」按钮（走一键导入，见补丁 05）。
++//   - 「铺开到各 CLI」按钮 → 弹出应用多选框，勾选后铺开并激活选中的 app。
 +//
 +// 换算/打码/使用率全走 03 的 format.ts 纯函数（与 open-code 同源）。key 明文绝不整段渲染。
 +
@@ -654,6 +822,7 @@ index 00000000..c1f9cd98
 +import { ProviderIcon } from "@/components/ProviderIcon";
 +import type { UniversalProvider } from "@/types";
 +import { useAccountProfile } from "./useAccountProfile";
++import { dokngDisplayName } from "./importKey";
 +import {
 +  formatCurrency,
 +  formatTokenCount,
@@ -665,8 +834,10 @@ index 00000000..c1f9cd98
 +
 +interface KeyCardProps {
 +  provider: UniversalProvider;
-+  // 重新铺开到各 CLI（补丁 05 接线）。可选：未接线时按钮不渲染。
++  // [ccs] 请求铺开：打开应用多选框（真正铺开在 AccountPanel 里，勾选后调 applyAccountToApps）。
++  // 可选：未接线时按钮不渲染。
 +  onImport?: (provider: UniversalProvider) => void;
++  // 该渠道正在铺开（禁用按钮 + 文案切换）。
 +  importing?: boolean;
 +  // [ccs] 删除该渠道（含二次确认，见 AccountPanel.handleDelete）。可选：未接线时按钮不渲染。
 +  onDelete?: (provider: UniversalProvider) => void;
@@ -688,11 +859,9 @@ index 00000000..c1f9cd98
 +  });
 +
 +  const profile = data?.ok ? data.profile : undefined;
-+  // 展示名：本地 name 优先，空则用远端 token.Name，再空用占位。
-+  const displayName =
-+    provider.name.trim() ||
-+    profile?.tokenName.trim() ||
-+    t("account.unnamedKey", { defaultValue: "未命名 key" });
++  // 展示名：Dokng · <渠道名>。渠道名取本地 name，空则退回远端 token.Name。
++  const rawName = provider.name.trim() || profile?.tokenName?.trim() || "";
++  const displayName = dokngDisplayName(rawName);
 +
 +  const errorText =
 +    (data && !data.ok ? data.error : undefined) ??
@@ -709,11 +878,7 @@ index 00000000..c1f9cd98
 +        {/* 头部：图标 + 名称 + 打码 key + 徽标 + 刷新 */}
 +        <div className="flex items-start justify-between gap-3">
 +          <div className="flex items-center gap-3 min-w-0">
-+            <ProviderIcon
-+              icon={provider.icon}
-+              name={provider.name}
-+              size={28}
-+            />
++            <ProviderIcon icon="dokng" name={displayName} size={28} />
 +            <div className="min-w-0">
 +              <div className="flex items-center gap-2">
 +                <span className="font-medium truncate">{displayName}</span>
@@ -815,7 +980,7 @@ index 00000000..c1f9cd98
 +          />
 +        )}
 +
-+        {/* 重新铺开按钮 */}
++        {/* [ccs] 铺开按钮：点击打开应用多选框（AccountPanel 承载勾选与铺开）。 */}
 +        {onImport && (
 +          <div className="flex justify-end">
 +            <Button
@@ -827,7 +992,7 @@ index 00000000..c1f9cd98
 +              {importing
 +                ? t("account.importing", { defaultValue: "铺开中…" })
 +                : t("account.importToClis", {
-+                    defaultValue: "重新铺开到各 CLI",
++                    defaultValue: "铺开到各 CLI",
 +                  })}
 +            </Button>
 +          </div>
@@ -858,47 +1023,316 @@ index 00000000..c1f9cd98
 +}
 diff --git a/src/components/account/importKey.ts b/src/components/account/importKey.ts
 new file mode 100644
-index 00000000..2818b452
+index 00000000..1354e253
 --- /dev/null
 +++ b/src/components/account/importKey.ts
-@@ -0,0 +1,66 @@
-+// [ccs] 一键导入 / 铺开逻辑。
+@@ -0,0 +1,334 @@
++// [ccs] Dokng 账户「铺开到各 CLI」逻辑。
 +//
-+// cc-switch 里「一个 new-api key」= 一条 providerType:"newapi" 的 UniversalProvider，
-+// upsert 后 sync 会把该 {baseUrl, apiKey} + 预设模型一次性写进 Claude / Codex / Gemini 三个 CLI。
-+// 这里封装两条路径：
-+//   - bindAccount：账户面板表单「绑定新账户」——用 NewAPI 预设新建一条渠道，upsert + sync；
-+//   - reapplyProvider：KeyCard「重新铺开到各 CLI」——已有渠道重新 sync（凭据/模型没变，仅重写 CLI 配置）。
++// cc-switch 里「一个 Dokng key」= 一条 providerType:"newapi" 的 UniversalProvider。
++// 但 upstream 的 universal sync（sync_universal_provider）只覆盖 Claude/Codex/Gemini，
++// 且只写 cc-switch 自己的数据库、不激活 live 配置——用户「用起来没感觉」正因如此。
 +//
-+// 与 open-code 对齐：open-code 那边「激活 key」= 把选中 key 写进各 CLI 的 env；这里等价动作是
-+// upsert + sync（sync 即 cc-switch 的落盘到各应用配置）。
++// 本模块改为直接构造各 app 的 Provider 并调 upstream 现成命令，覆盖全部 7 个应用
++// （Claude / Claude Desktop / Codex / Gemini / OpenCode / OpenClaw / Hermes），
++// 完全不改 upstream 核心结构（UniversalProviderApps 保持三字段不动），最小侵入：
++//   - bindAccount：绑定新账户 → 存 UniversalProvider（供账户面板列表）+ 铺到 7 个 app 的
++//     「列表」（不激活，避免覆盖用户已选的当前供应商）；
++//   - applyAccountToApps：KeyCard「铺开到各 CLI」按用户勾选 → 铺 + 激活选中的 app。
++//
++// 激活语义（对齐 upstream add/switch）：
++//   - switch 类（claude/claude-desktop/codex/gemini）：add 只在该 app 无当前供应商时自动
++//     激活；显式激活时再调 switch 设为当前（会替换当前选择——仅对用户勾选的 app 生效）。
++//   - additive 类（opencode/openclaw/hermes）：add(addToLive) 直接决定是否写 live。
 +
-+import { universalProvidersApi } from "@/lib/api";
++import { providersApi, universalProvidersApi } from "@/lib/api";
 +import {
 +  createUniversalProviderFromPreset,
 +  findPresetByType,
 +} from "@/config/universalProviderPresets";
 +import { generateUUID } from "@/utils/uuid";
-+import type { UniversalProvider } from "@/types";
++import type { Provider, UniversalProvider, VisibleApps } from "@/types";
++import type { AppId } from "@/lib/api/types";
 +
-+// [ccs] 规整 baseUrl：去掉尾部斜杠。后端 derive_api_base 会再做 /api/... 拼接，这里只做表层清理。
-+function normalizeBaseUrl(raw: string): string {
-+  return raw.trim().replace(/\/+$/, "");
++// [ccs] Dokng 品牌常量：官网 + 图标名（图标已注册进 icons/extracted，见补丁 04）。
++export const DOKNG_WEBSITE_URL = "https://dokng.com/";
++export const DOKNG_ICON = "dokng";
++
++// [ccs] 可铺开的目标应用全集（顺序即铺开/展示顺序）。
++export const DOKNG_TARGET_APPS: AppId[] = [
++  "claude",
++  "claude-desktop",
++  "codex",
++  "gemini",
++  "opencode",
++  "openclaw",
++  "hermes",
++];
++
++// [ccs] 按 visibleApps 过滤出实际在用的目标应用：只对用户没隐藏的 app 铺开/展示，
++// 避免往未安装/已隐藏的应用（如没装的 Hermes）写记录污染其标签页。
++// visibleApps 缺省（老配置未含该字段）时视为全部可见，退回全集。
++export function resolveTargetApps(visibleApps?: VisibleApps): AppId[] {
++  if (!visibleApps) return DOKNG_TARGET_APPS;
++  return DOKNG_TARGET_APPS.filter((app) => visibleApps[app] !== false);
++}
++
++// [ccs] 各 app 默认模型：沿用 universalProviderPresets 的 NEWAPI 默认值，保持与既有假设一致。
++const MODELS = {
++  claude: "claude-sonnet-5",
++  claudeHaiku: "claude-haiku-4-5-20251001",
++  claudeSonnet: "claude-sonnet-5",
++  claudeOpus: "claude-opus-4-8",
++  codex: "gpt-5.5",
++  codexEffort: "high",
++  gemini: "gemini-3.5-flash",
++};
++
++// [ccs] 展示名统一加 Dokng 前缀：`Dokng · <渠道名>`（渠道名空则退回 `Dokng`）。
++// 账户面板卡片与铺开到各 app 后的供应商名都走它。
++export function dokngDisplayName(rawName: string | undefined | null): string {
++  const n = (rawName ?? "").trim();
++  return n ? `Dokng · ${n}` : "Dokng";
++}
++
++// [ccs] additive 类应用：add 时 addToLive 直接决定写 live，无「当前供应商」概念。
++function isAdditiveApp(app: AppId): boolean {
++  return app === "opencode" || app === "openclaw" || app === "hermes";
++}
++
++// [ccs] Codex/OpenAI base_url：纯 origin 补 /v1，已带路径/已 /v1 则原样（对齐后端 to_codex_provider）。
++function codexBaseUrl(baseUrl: string): string {
++  const trimmed = baseUrl.replace(/\/+$/, "");
++  if (trimmed.endsWith("/v1")) return trimmed;
++  const afterScheme = trimmed.includes("://")
++    ? trimmed.slice(trimmed.indexOf("://") + 3)
++    : trimmed;
++  const originOnly = !afterScheme.includes("/");
++  return originOnly ? `${trimmed}/v1` : trimmed;
++}
++
++interface BuildArgs {
++  // UniversalProvider 稳定 id（用于派生各 app 子供应商 id）。
++  universalId: string;
++  // 展示名（已含 Dokng 前缀）。
++  displayName: string;
++  baseUrl: string;
++  apiKey: string;
++  // 置顶用的排序索引（该 app 现有最小值 - 1）。
++  sortIndex?: number;
++}
++
++// [ccs] 为某个 app 构造对应 settings_config 形状的 Provider。各形状均核对自后端权威定义
++// （provider.rs 的 to_xx_provider / 各 *_config.rs / 预设类型）。
++function buildProviderForApp(app: AppId, args: BuildArgs): Provider {
++  const { universalId, displayName, baseUrl, apiKey, sortIndex } = args;
++  const common = {
++    id: `dokng-${app}-${universalId}`,
++    name: displayName,
++    websiteUrl: DOKNG_WEBSITE_URL,
++    category: "aggregator" as const,
++    icon: DOKNG_ICON,
++    sortIndex,
++  };
++
++  switch (app) {
++    case "claude":
++      return {
++        ...common,
++        settingsConfig: {
++          env: {
++            ANTHROPIC_BASE_URL: baseUrl,
++            ANTHROPIC_AUTH_TOKEN: apiKey,
++            ANTHROPIC_MODEL: MODELS.claude,
++            ANTHROPIC_DEFAULT_HAIKU_MODEL: MODELS.claudeHaiku,
++            ANTHROPIC_DEFAULT_SONNET_MODEL: MODELS.claudeSonnet,
++            ANTHROPIC_DEFAULT_OPUS_MODEL: MODELS.claudeOpus,
++          },
++        },
++      };
++
++    // Claude Desktop：direct 直连模式（dokng 是 Anthropic 兼容端点）。需 env 双字段
++    // + meta.claudeDesktopMode="direct" + claude-safe 路由（model 必须等于 routeId）。
++    case "claude-desktop":
++      return {
++        ...common,
++        settingsConfig: {
++          env: {
++            ANTHROPIC_BASE_URL: baseUrl,
++            ANTHROPIC_AUTH_TOKEN: apiKey,
++          },
++        },
++        meta: {
++          claudeDesktopMode: "direct",
++          claudeDesktopModelRoutes: {
++            "claude-sonnet-5": { model: "claude-sonnet-5", supports1m: false },
++            "claude-opus-4-8": { model: "claude-opus-4-8", supports1m: false },
++            "claude-haiku-4-5": { model: "claude-haiku-4-5", supports1m: false },
++          },
++        },
++      };
++
++    case "codex": {
++      const cbase = codexBaseUrl(baseUrl);
++      const configToml = [
++        `model_provider = "custom"`,
++        `model = "${MODELS.codex}"`,
++        `model_reasoning_effort = "${MODELS.codexEffort}"`,
++        `disable_response_storage = true`,
++        ``,
++        `[model_providers.custom]`,
++        `name = "Dokng"`,
++        `base_url = "${cbase}"`,
++        `wire_api = "responses"`,
++        `requires_openai_auth = true`,
++      ].join("\n");
++      return {
++        ...common,
++        settingsConfig: {
++          auth: { OPENAI_API_KEY: apiKey },
++          config: configToml,
++        },
++      };
++    }
++
++    case "gemini":
++      return {
++        ...common,
++        settingsConfig: {
++          env: {
++            GOOGLE_GEMINI_BASE_URL: baseUrl,
++            GEMINI_API_KEY: apiKey,
++            GEMINI_MODEL: MODELS.gemini,
++          },
++        },
++      };
++
++    // OpenCode：AI SDK 包名 + options 嵌套凭据 + models 字典。
++    case "opencode":
++      return {
++        ...common,
++        settingsConfig: {
++          npm: "@ai-sdk/anthropic",
++          name: displayName,
++          options: { baseURL: baseUrl, apiKey },
++          models: {
++            "claude-sonnet-5": { name: "Claude Sonnet 5" },
++            "claude-opus-4-8": { name: "Claude Opus 4.8" },
++          },
++        },
++      };
++
++    // OpenClaw：顶层 camelCase 凭据 + api 协议 + models 数组。
++    case "openclaw":
++      return {
++        ...common,
++        settingsConfig: {
++          baseUrl,
++          apiKey,
++          api: "anthropic-messages",
++          models: [
++            { id: "claude-sonnet-5", name: "Claude Sonnet 5" },
++            { id: "claude-opus-4-8", name: "Claude Opus 4.8" },
++          ],
++        },
++      };
++
++    // Hermes：顶层 snake_case + api_mode + models 数组（内部 name 用 slug 避免 YAML 键含空格）。
++    case "hermes":
++      return {
++        ...common,
++        settingsConfig: {
++          name: `dokng-${universalId.slice(0, 8)}`,
++          base_url: baseUrl,
++          api_key: apiKey,
++          api_mode: "anthropic_messages",
++          models: [{ id: "claude-sonnet-5", name: "Claude Sonnet 5" }],
++        },
++      };
++  }
++}
++
++export interface ApplyAppResult {
++  app: AppId;
++  ok: boolean;
++  error?: string;
++}
++
++// [ccs] 把一条 Dokng 账户铺到指定应用列表。activate=true 时激活（switch 类设为当前、
++// additive 类写 live）；false 时仅加进列表不激活。逐 app 独立捕获错误，互不影响。
++export async function applyAccountToApps(
++  provider: UniversalProvider,
++  apps: AppId[],
++  options: { activate: boolean },
++): Promise<ApplyAppResult[]> {
++  const displayName = dokngDisplayName(provider.name);
++  const results: ApplyAppResult[] = [];
++
++  for (const app of apps) {
++    try {
++      // 置顶排序：
++      //   - 若该 Dokng 子供应商已存在（重复铺开），复用它现有的 sortIndex——不再往前累减，
++      //     避免每次铺开数值无限变小（漂移）。
++      //   - 仅首次铺开（列表里还没有它）时，取现有最小 sortIndex - 1 置顶为第一个。
++      const childId = `dokng-${app}-${provider.id}`;
++      const existing = await providersApi.getAll(app);
++      const self = existing[childId];
++      let topIndex: number;
++      if (self && typeof self.sortIndex === "number") {
++        topIndex = self.sortIndex;
++      } else {
++        const indices = Object.values(existing)
++          .map((p) => p.sortIndex)
++          .filter((i): i is number => typeof i === "number");
++        topIndex = indices.length ? Math.min(...indices) - 1 : 0;
++      }
++
++      const appProvider = buildProviderForApp(app, {
++        universalId: provider.id,
++        displayName,
++        baseUrl: provider.baseUrl,
++        apiKey: provider.apiKey,
++        sortIndex: topIndex,
++      });
++
++      // add：additive 类由 addToLive=activate 决定是否写 live；switch 类仅在无当前时自动激活。
++      // save_provider 对已存在 id 覆盖，故重复铺开幂等。
++      await providersApi.add(appProvider, app, options.activate);
++
++      // switch 类应用：显式激活时设为当前（会替换当前选择——仅对用户勾选的 app 生效）。
++      if (options.activate && !isAdditiveApp(app)) {
++        await providersApi.switch(appProvider.id, app);
++      }
++
++      results.push({ app, ok: true });
++    } catch (error) {
++      results.push({
++        app,
++        ok: false,
++        error: error instanceof Error ? error.message : String(error),
++      });
++    }
++  }
++
++  return results;
 +}
 +
 +export interface BindAccountArgs {
 +  baseUrl: string;
 +  apiKey: string;
-+  // 展示名。留空则回落到预设名 "NewAPI"（远端 token.Name 由卡片按需覆盖展示）。
++  // 渠道展示名（可选）。存进 UniversalProvider.name 的原始值；显示/铺开时再加 Dokng 前缀。
 +  name?: string;
++  // 用户当前可见的应用（settings.visibleApps）。仅向可见 app 铺开，避免污染未装应用的列表。
++  visibleApps?: VisibleApps;
 +}
 +
-+// [ccs] 绑定新账户：用 NewAPI 预设组装一条 newapi 渠道并落盘到各 CLI。返回新建的渠道。
-+// 失败（找不到预设 / upsert 失败）抛错，由调用方（AccountPanel）捕获展示。
++// [ccs] 绑定新账户：建一条 newapi UniversalProvider（覆盖 Dokng 官网/图标），upsert 存盘，
++// 再铺到「可见」的 app 列表（activate=false，不覆盖用户已选的当前供应商）。返回新渠道。
 +export async function bindAccount({
 +  baseUrl,
 +  apiKey,
 +  name,
++  visibleApps,
 +}: BindAccountArgs): Promise<UniversalProvider> {
 +  const preset = findPresetByType("newapi");
 +  if (!preset) {
@@ -908,25 +1342,24 @@ index 00000000..2818b452
 +  const provider = createUniversalProviderFromPreset(
 +    preset,
 +    generateUUID(),
-+    normalizeBaseUrl(baseUrl),
++    baseUrl.trim().replace(/\/+$/, ""),
 +    apiKey.trim(),
 +    name?.trim() || undefined,
 +  );
++  // 覆盖为 Dokng 品牌：官网指向自建站点、图标用 Dokng logo。
++  provider.websiteUrl = DOKNG_WEBSITE_URL;
++  provider.icon = DOKNG_ICON;
 +
 +  const ok = await universalProvidersApi.upsert(provider);
 +  if (!ok) {
 +    throw new Error("保存渠道失败");
 +  }
-+  // 铺开到 Claude / Codex / Gemini。sync 失败不影响渠道已存在，交由调用方决定是否提示。
-+  await universalProvidersApi.sync(provider.id);
-+  return provider;
-+}
 +
-+// [ccs] 重新铺开已有渠道到各 CLI：凭据/模型未变，仅重写 CLI 配置（等价 open-code 的重新激活）。
-+export async function reapplyProvider(
-+  provider: UniversalProvider,
-+): Promise<void> {
-+  await universalProvidersApi.sync(provider.id);
++  // 铺到「可见」的 app 列表（不激活）；单个 app 失败不阻断其余，交由调用方按需提示。
++  await applyAccountToApps(provider, resolveTargetApps(visibleApps), {
++    activate: false,
++  });
++  return provider;
 +}
 diff --git a/src/components/account/useAccountProfile.ts b/src/components/account/useAccountProfile.ts
 new file mode 100644
@@ -982,3 +1415,37 @@ index 00000000..f45d4071
 +    refetchOnWindowFocus: false,
 +  });
 +}
+diff --git a/src/icons/extracted/index.ts b/src/icons/extracted/index.ts
+index 8bb7e1f0..859da928 100644
+--- a/src/icons/extracted/index.ts
++++ b/src/icons/extracted/index.ts
+@@ -99,6 +99,9 @@ export const icons: Record<string, string> = {
+   novita: `<svg width="1em" height="1em" style="flex:none;line-height:1" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg"><title>Novita</title><g clip-path="url(#clip0_3135_1230)"><path d="M15.5564 8.26172V16.5239L2.1875 29.8928H15.5564V21.6302L23.8194 29.8928H37.1875L15.5564 8.26172Z" fill="#000000"/></g><defs><clipPath id="clip0_3135_1230"><rect width="35" height="21.6311" fill="white" transform="translate(2.1875 8.26172)"/></clipPath></defs></svg>`,
+   nvidia: `<svg height="1em" style="flex:none;line-height:1" viewBox="0 0 24 24" width="1em" xmlns="http://www.w3.org/2000/svg"><title>Nvidia</title><path d="M10.212 8.976V7.62c.127-.01.256-.017.388-.021 3.596-.117 5.957 3.184 5.957 3.184s-2.548 3.647-5.282 3.647a3.227 3.227 0 01-1.063-.175v-4.109c1.4.174 1.681.812 2.523 2.258l1.873-1.627a4.905 4.905 0 00-3.67-1.846 6.594 6.594 0 00-.729.044m0-4.476v2.025c.13-.01.259-.019.388-.024 5.002-.174 8.261 4.226 8.261 4.226s-3.743 4.69-7.643 4.69c-.338 0-.675-.031-1.007-.092v1.25c.278.038.558.057.838.057 3.629 0 6.253-1.91 8.794-4.169.421.347 2.146 1.193 2.501 1.564-2.416 2.083-8.048 3.763-11.24 3.763-.308 0-.603-.02-.894-.048V19.5H24v-15H10.21zm0 9.756v1.068c-3.356-.616-4.287-4.21-4.287-4.21a7.173 7.173 0 014.287-2.138v1.172h-.005a3.182 3.182 0 00-2.502 1.178s.615 2.276 2.507 2.931m-5.961-3.3c1.436-1.935 3.604-3.148 5.961-3.336V6.523C5.81 6.887 2 10.723 2 10.723s2.158 6.427 8.21 7.015v-1.166C5.77 16 4.25 10.958 4.25 10.958h-.002z" fill="#74B71B" fill-rule="nonzero"></path></svg>`,
+   bailian: `<svg fill="currentColor" fill-rule="evenodd" height="1em" style="flex:none;line-height:1" viewBox="0 0 24 24" width="1em" xmlns="http://www.w3.org/2000/svg"><title>BaiLian</title><path d="M6.336 8.919v6.162l5.335-3.083L6.337 8.92z" fill-opacity=".4"></path><path d="M21.394 5.288s-.006-.006-.01-.006L17.01 2.754 6.336 8.92l5.335 3.082 9.701-5.6.016-.01a.635.635 0 00.006-1.1v-.003z" fill-opacity=".8"></path><path d="M21.71 12.465a.62.62 0 00-.316.085s-.006 0-.009.003l-4.375 2.528 5.05 2.915h.006a2.06 2.06 0 00.28-1.04v-3.855a.637.637 0 00-.636-.636z"></path><path d="M22.06 17.996l-5.05-2.915L6.34 21.242l4.27 2.465s.016.006.022.012a2.102 2.102 0 002.093 0c.006-.003.016-.006.022-.012l8.538-4.93c.003 0 .006-.003.01-.006.321-.183.589-.45.775-.772h-.006l-.004-.003z" fill-opacity=".8"></path><path d="M11.672 11.998l-5.336 3.083-1.444.832-3.605 2.083H1.28c.173.303.416.555.709.738l.078.044.016.01.02.012 4.232 2.442 10.671-6.161-5.335-3.082z"></path><path d="M12.74.29c-.1-.06-.208-.107-.315-.148-.02-.006-.038-.016-.057-.022a2.121 2.121 0 00-.7-.12c-.233 0-.457.038-.668.11l-.031.01a2.196 2.196 0 00-.372.17L2.068 5.222s-.003 0-.006.003c-.324.183-.592.451-.781.773h.006l5.049 2.918L17.01 2.758 12.74.29z" fill-opacity=".6"></path><path d="M1.287 6.001H1.28A2.06 2.06 0 001 7.041v9.915c0 .378.1.735.28 1.043h.007l5.049-2.918V8.919l-5.05-2.918z" fill-opacity=".3"></path></svg>`,
++  // [ccs] Dokng 品牌图标。来自 brand/icons/logo.svg（open-code 同款），压单行 + defs id 加
++  // dokng- 前缀防与页面其它 inline SVG 的 gradient/filter id 冲突 + 尺寸改 1em 适配图标系统。
++  dokng: `<svg width="1em" height="1em" style="flex:none;line-height:1" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><title>Dokng</title><defs><linearGradient id="dokng-bg" x1="4" y1="2" x2="44" y2="46" gradientUnits="userSpaceOnUse"><stop stop-color="#f8fafc"/><stop offset=".5" stop-color="#eff6ff"/><stop offset="1" stop-color="#e0e7ff"/></linearGradient><linearGradient id="dokng-main" x1="10" y1="8" x2="38" y2="40" gradientUnits="userSpaceOnUse"><stop stop-color="#06b6d4"/><stop offset=".5" stop-color="#3b82f6"/><stop offset="1" stop-color="#8b5cf6"/></linearGradient><linearGradient id="dokng-sheen" x1="8" y1="6" x2="40" y2="42" gradientUnits="userSpaceOnUse"><stop stop-color="#ffffff" stop-opacity=".92"/><stop offset=".5" stop-color="#ffffff" stop-opacity=".18"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></linearGradient><radialGradient id="dokng-glow" cx="0.34" cy="0.28" r="0.8"><stop stop-color="#38bdf8" stop-opacity=".2"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></radialGradient><filter id="dokng-soft" x="-35%" y="-35%" width="170%" height="170%"><feGaussianBlur stdDeviation=".8" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><rect x="1.5" y="1.5" width="45" height="45" rx="14" fill="url(#dokng-bg)" stroke="#c7d2fe"/><rect x="1.5" y="1.5" width="45" height="45" rx="14" fill="url(#dokng-glow)"/><rect x="2.4" y="2.4" width="43.2" height="43.2" rx="13.1" fill="url(#dokng-sheen)" opacity=".55"/><rect x="2.8" y="2.8" width="42.4" height="42.4" rx="12.7" fill="none" stroke="#ffffff" stroke-opacity=".5" stroke-width=".75"/><circle cx="24" cy="24" r="17.6" fill="none" stroke="#e0e7ff" stroke-width=".85" stroke-dasharray="1.5 2.3"/><circle cx="24" cy="24" r="15.35" fill="none" stroke="#c7d2fe" stroke-width="1" opacity=".68"/><circle cx="24" cy="24" r="13.35" fill="none" stroke="#ddd6fe" stroke-width="1.1" opacity=".82"/><path d="M24 8.95 A15.05 15.05 0 0 1 38.05 17.05" fill="none" stroke="url(#dokng-main)" stroke-width="2.45" stroke-linecap="round" filter="url(#dokng-soft)"/><path d="M24 39.05 A15.05 15.05 0 0 1 9.95 30.95" fill="none" stroke="url(#dokng-main)" stroke-width="2.45" stroke-linecap="round" filter="url(#dokng-soft)"/><path d="M11.8 15 A15.05 15.05 0 0 1 17.7 9.2" fill="none" stroke="#67e8f9" stroke-width="1.1" stroke-linecap="round" opacity=".5"/><path d="M36.2 33 A15.05 15.05 0 0 1 30.3 38.8" fill="none" stroke="#c4b5fd" stroke-width="1.1" stroke-linecap="round" opacity=".5"/><g filter="url(#dokng-soft)"><circle cx="38.05" cy="17.05" r="2.35" fill="#06b6d4"/><circle cx="9.95" cy="30.95" r="2.35" fill="#8b5cf6"/></g><circle cx="38.05" cy="17.05" r="1" fill="#ecfeff"/><circle cx="9.95" cy="30.95" r="1" fill="#f5f3ff"/><circle cx="17.7" cy="9.2" r=".9" fill="#22d3ee" opacity=".65"/><circle cx="30.3" cy="38.8" r=".9" fill="#a78bfa" opacity=".65"/><path d="M17.2 21.5 C17.2 16 20 14 24 14 C28 14 30.8 16 30.8 21.5" fill="none" stroke="url(#dokng-main)" stroke-width="2.25" stroke-linecap="round"/><path d="M15.6 22 C13.1 22 13.4 26.6 15.3 27.8" fill="none" stroke="url(#dokng-main)" stroke-width="1.45" stroke-linecap="round" opacity=".4"/><path d="M32.4 22 C34.9 22 34.6 26.6 32.7 27.8" fill="none" stroke="url(#dokng-main)" stroke-width="1.45" stroke-linecap="round" opacity=".4"/><circle cx="20.2" cy="22.1" r="1.5" fill="#06b6d4"/><circle cx="20.2" cy="22.1" r=".52" fill="#ffffff" opacity=".75"/><circle cx="27.8" cy="22.1" r="1.5" fill="#8b5cf6"/><circle cx="27.8" cy="22.1" r=".52" fill="#ffffff" opacity=".75"/><ellipse cx="24" cy="28" rx="3.25" ry="2.4" fill="url(#dokng-main)"/><ellipse cx="24" cy="27.35" rx="1.35" ry=".6" fill="#ffffff" opacity=".65"/><circle cx="14.8" cy="12.4" r=".7" fill="#22d3ee" opacity=".55"/><circle cx="33.2" cy="35.6" r=".7" fill="#a78bfa" opacity=".55"/><path d="M9 24h1.8M37.2 24h1.8" stroke="#93c5fd" stroke-width=".8" stroke-linecap="round" opacity=".35"/></svg>`,
+ };
+ 
+ export const iconUrls: Record<string, string> = {
+diff --git a/src/icons/extracted/metadata.ts b/src/icons/extracted/metadata.ts
+index abb7852c..c67dc4f0 100644
+--- a/src/icons/extracted/metadata.ts
++++ b/src/icons/extracted/metadata.ts
+@@ -432,6 +432,15 @@ export const iconMetadata: Record<string, IconMetadata> = {
+     keywords: [],
+     defaultColor: "currentColor",
+   },
++  // [ccs] Dokng 品牌图标元数据。defaultColor 用品牌主色（青蓝渐变中段），
++  // 无自定义 color 时 ProviderIcon 会取它着色。
++  dokng: {
++    name: "dokng",
++    displayName: "Dokng",
++    category: "ai-provider",
++    keywords: ["dokng", "gateway", "relay", "claude", "codex", "gemini"],
++    defaultColor: "#3b82f6",
++  },
+   notion: {
+     name: "notion",
+     displayName: "notion",

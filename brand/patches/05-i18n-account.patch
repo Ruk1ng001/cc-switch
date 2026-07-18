@@ -10,21 +10,15 @@
 #   - src/i18n/locales/en.json
 #   - src/i18n/locales/ja.json
 #
-# key 集合与 04 组件中 t("account.*") 引用严格 1:1（经脚本比对：零缺失，各 45 个 key）。
-# 采用「首行后插入」而非重排，最大化减少与上游 locale 的 diff 面（仅新增行，不动既有翻译字节）。
-#
-# 依赖：04（账户面板 UI，引用 account.* key）。与其它补丁不共享文件。
-# 应用（在 upstream/ 内，基线为 brand/BASE_SHA）：
-#   git -C upstream apply brand/patches/05-i18n-account.patch
 diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
-index 4dd0b9a6..1893d10e 100644
+index 4dd0b9a6..5f37f255 100644
 --- a/src/i18n/locales/en.json
 +++ b/src/i18n/locales/en.json
-@@ -1,4 +1,51 @@
+@@ -1,4 +1,55 @@
  {
 +  "account": {
 +    "title": "My Account",
-+    "subtitle": "Manage new-api accounts and deploy to all CLIs in one click",
++    "subtitle": "Manage Dokng accounts and deploy to your CLIs in one click",
 +    "listTitle": "Bound accounts",
 +    "reloadList": "Refresh list",
 +    "console": "Console",
@@ -38,7 +32,7 @@ index 4dd0b9a6..1893d10e 100644
 +    "openLinkError": "Failed to open link: {{error}}",
 +    "usageRingLabel": "Account quota used {{pct}}%",
 +    "used": "Used",
-+    "empty": "No accounts bound yet. Use the form above to bind your first one.",
++    "empty": "No accounts bound yet. Click \"Add account\" below to bind your first one.",
 +    "bindTitle": "Bind new account",
 +    "baseUrl": "Endpoint URL",
 +    "apiKey": "API Key",
@@ -60,10 +54,14 @@ index 4dd0b9a6..1893d10e 100644
 +    "keyQuota": "Key quota",
 +    "todayRequests": "Requests today",
 +    "unlimited": "Unlimited",
-+    "importToClis": "Redeploy to all CLIs",
++    "importToClis": "Deploy to apps",
 +    "importing": "Deploying…",
-+    "reapplySuccess": "Redeployed to all CLIs",
++    "reapplySuccess": "Deployed and activated",
++    "reapplyPartial": "Some apps failed to deploy: {{apps}}",
 +    "reapplyError": "Deploy failed: {{error}}",
++    "applyTitle": "Deploy to apps",
++    "applySubtitle": "Select the apps to write and activate. Only the selected apps are changed; others are untouched.",
++    "applyConfirm": "Deploy and activate",
 +    "deleteConfirmTitle": "Delete account",
 +    "deleteConfirm": "Delete account \"{{name}}\"? This cannot be undone.",
 +    "deleteSuccess": "Account deleted",
@@ -73,14 +71,14 @@ index 4dd0b9a6..1893d10e 100644
      "title": "CC Switch",
      "description": "All-in-One Assistant for Claude Code, Codex & Gemini CLI"
 diff --git a/src/i18n/locales/ja.json b/src/i18n/locales/ja.json
-index 94dfe2c5..44079409 100644
+index 94dfe2c5..6f929aae 100644
 --- a/src/i18n/locales/ja.json
 +++ b/src/i18n/locales/ja.json
-@@ -1,4 +1,51 @@
+@@ -1,4 +1,55 @@
  {
 +  "account": {
 +    "title": "マイアカウント",
-+    "subtitle": "new-api アカウントを管理し、各 CLI にワンクリックで展開",
++    "subtitle": "Dokng アカウントを管理し、各アプリにワンクリックで展開",
 +    "listTitle": "バインド済みアカウント",
 +    "reloadList": "リストを更新",
 +    "console": "コンソール",
@@ -94,7 +92,7 @@ index 94dfe2c5..44079409 100644
 +    "openLinkError": "リンクを開けませんでした：{{error}}",
 +    "usageRingLabel": "アカウント額度の使用率 {{pct}}%",
 +    "used": "使用済み",
-+    "empty": "まだアカウントがバインドされていません。上のフォームで最初のアカウントをバインドしてください。",
++    "empty": "まだアカウントがバインドされていません。下の「アカウントを追加」から最初のアカウントをバインドしてください。",
 +    "bindTitle": "新しいアカウントをバインド",
 +    "baseUrl": "エンドポイント URL",
 +    "apiKey": "API Key",
@@ -116,10 +114,14 @@ index 94dfe2c5..44079409 100644
 +    "keyQuota": "Key クォータ",
 +    "todayRequests": "本日のリクエスト",
 +    "unlimited": "無制限",
-+    "importToClis": "各 CLI に再展開",
++    "importToClis": "各 CLI に展開",
 +    "importing": "展開中…",
-+    "reapplySuccess": "各 CLI に再展開しました",
++    "reapplySuccess": "展開して有効化しました",
++    "reapplyPartial": "一部のアプリで展開に失敗：{{apps}}",
 +    "reapplyError": "展開失敗：{{error}}",
++    "applyTitle": "アプリに展開",
++    "applySubtitle": "書き込んで有効化するアプリを選択してください。選択したアプリのみが変更され、他のアプリには影響しません。",
++    "applyConfirm": "展開して有効化",
 +    "deleteConfirmTitle": "アカウントを削除",
 +    "deleteConfirm": "アカウント「{{name}}」を削除しますか？この操作は取り消せません。",
 +    "deleteSuccess": "アカウントを削除しました",
@@ -129,14 +131,14 @@ index 94dfe2c5..44079409 100644
      "title": "CC Switch",
      "description": "Claude Code・Codex・Gemini CLI のためのオールインワンアシスタント"
 diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
-index 8cab77aa..f3992704 100644
+index 8cab77aa..bb4a708a 100644
 --- a/src/i18n/locales/zh-TW.json
 +++ b/src/i18n/locales/zh-TW.json
-@@ -1,4 +1,51 @@
+@@ -1,4 +1,55 @@
  {
 +  "account": {
 +    "title": "我的帳戶",
-+    "subtitle": "管理 new-api 帳戶，一鍵鋪開到各 CLI",
++    "subtitle": "管理 Dokng 帳戶，一鍵鋪開到各 CLI",
 +    "listTitle": "已綁定帳戶",
 +    "reloadList": "重新整理列表",
 +    "console": "控制台",
@@ -150,7 +152,7 @@ index 8cab77aa..f3992704 100644
 +    "openLinkError": "開啟連結失敗：{{error}}",
 +    "usageRingLabel": "帳戶額度已用 {{pct}}%",
 +    "used": "已用",
-+    "empty": "還沒有綁定任何帳戶，用上方表單綁定第一個",
++    "empty": "還沒有綁定任何帳戶，點下方「新增帳戶」綁定第一個",
 +    "bindTitle": "綁定新帳戶",
 +    "baseUrl": "介面位址",
 +    "apiKey": "API Key",
@@ -172,10 +174,14 @@ index 8cab77aa..f3992704 100644
 +    "keyQuota": "Key 額度",
 +    "todayRequests": "今日請求",
 +    "unlimited": "不限",
-+    "importToClis": "重新鋪開到各 CLI",
++    "importToClis": "鋪開到各 CLI",
 +    "importing": "鋪開中…",
-+    "reapplySuccess": "已重新鋪開到各 CLI",
++    "reapplySuccess": "已鋪開並啟用",
++    "reapplyPartial": "部分應用鋪開失敗：{{apps}}",
 +    "reapplyError": "鋪開失敗：{{error}}",
++    "applyTitle": "鋪開到應用",
++    "applySubtitle": "勾選要寫入並啟用的應用。僅選中的應用會被改動，其它應用不受影響。",
++    "applyConfirm": "鋪開並啟用",
 +    "deleteConfirmTitle": "刪除帳戶",
 +    "deleteConfirm": "確定刪除帳戶「{{name}}」？此操作無法復原。",
 +    "deleteSuccess": "已刪除帳戶",
@@ -185,14 +191,14 @@ index 8cab77aa..f3992704 100644
      "title": "CC Switch",
      "description": "Claude Code / Codex / Gemini CLI 全方位輔助工具"
 diff --git a/src/i18n/locales/zh.json b/src/i18n/locales/zh.json
-index b0f60dd3..915796d3 100644
+index b0f60dd3..dfb7da85 100644
 --- a/src/i18n/locales/zh.json
 +++ b/src/i18n/locales/zh.json
-@@ -1,4 +1,51 @@
+@@ -1,4 +1,55 @@
  {
 +  "account": {
 +    "title": "我的账户",
-+    "subtitle": "管理 new-api 账户，一键铺开到各 CLI",
++    "subtitle": "管理 Dokng 账户，一键铺开到各 CLI",
 +    "listTitle": "已绑定账户",
 +    "reloadList": "刷新列表",
 +    "console": "控制台",
@@ -206,7 +212,7 @@ index b0f60dd3..915796d3 100644
 +    "openLinkError": "打开链接失败：{{error}}",
 +    "usageRingLabel": "账户额度已用 {{pct}}%",
 +    "used": "已用",
-+    "empty": "还没有绑定任何账户，用上方表单绑定第一个",
++    "empty": "还没有绑定任何账户，点下方「新增账户」绑定第一个",
 +    "bindTitle": "绑定新账户",
 +    "baseUrl": "接口地址",
 +    "apiKey": "API Key",
@@ -228,10 +234,14 @@ index b0f60dd3..915796d3 100644
 +    "keyQuota": "Key 额度",
 +    "todayRequests": "今日请求",
 +    "unlimited": "不限",
-+    "importToClis": "重新铺开到各 CLI",
++    "importToClis": "铺开到各 CLI",
 +    "importing": "铺开中…",
-+    "reapplySuccess": "已重新铺开到各 CLI",
++    "reapplySuccess": "已铺开并激活",
++    "reapplyPartial": "部分应用铺开失败：{{apps}}",
 +    "reapplyError": "铺开失败：{{error}}",
++    "applyTitle": "铺开到应用",
++    "applySubtitle": "勾选要写入并激活的应用。仅选中的应用会被改动，其它应用不受影响。",
++    "applyConfirm": "铺开并激活",
 +    "deleteConfirmTitle": "删除账户",
 +    "deleteConfirm": "确定删除账户「{{name}}」？此操作不可撤销。",
 +    "deleteSuccess": "已删除账户",
