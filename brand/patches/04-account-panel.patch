@@ -91,10 +91,10 @@ index 645f1002..80bb846d 100644
  }
 diff --git a/src/components/account/AccountPanel.tsx b/src/components/account/AccountPanel.tsx
 new file mode 100644
-index 00000000..01b47a33
+index 00000000..c4e466cb
 --- /dev/null
 +++ b/src/components/account/AccountPanel.tsx
-@@ -0,0 +1,702 @@
+@@ -0,0 +1,747 @@
 +// [ccs] 账户面板容器（对齐 open-code 完整版：固定头部 + 固定账户概览 + 独立滚动 key 列表 + 底部新增）。
 +//
 +// 列出所有 providerType:"newapi" 的 UniversalProvider（= 一个个 Dokng key），逐个渲染 KeyCard
@@ -239,12 +239,17 @@ index 00000000..01b47a33
 +            t("account.reapplySuccess", { defaultValue: "已铺开并激活" }),
 +          );
 +        } else {
-+          toast.error(
-+            t("account.reapplyPartial", {
-+              defaultValue: "部分应用铺开失败：{{apps}}",
-+              apps: failed.map((r) => r.app).join(", "),
-+            }),
-+          );
++          // 逐个失败 app 单独弹一条错误，带上具体原因（后端返回的 error），
++          // 便于定位「某应用为何铺开失败」——不再只显示 app 名而吞掉错误细节。
++          for (const r of failed) {
++            toast.error(
++              t("account.reapplyOneFailed", {
++                defaultValue: "{{app}} 铺开失败：{{error}}",
++                app: t(`apps.${r.app}`, { defaultValue: r.app }),
++                error: r.error ?? "未知错误",
++              }),
++            );
++          }
 +        }
 +      } catch (error) {
 +        const message = error instanceof Error ? error.message : String(error);
@@ -367,7 +372,7 @@ index 00000000..01b47a33
 +      {/* ── 列表工具条（固定）：已绑定账户 (N) + 刷新 ──────────────────── */}
 +      <div className="flex items-center justify-between px-6 pt-4 pb-2 flex-shrink-0">
 +        <span className="text-sm font-medium">
-+          {t("account.listTitle", { defaultValue: "已绑定账户" })}
++          {t("account.listTitle", { defaultValue: "已绑定 key" })}
 +          {newapiProviders.length > 0 ? ` (${newapiProviders.length})` : ""}
 +        </span>
 +        <Button
@@ -390,7 +395,7 @@ index 00000000..01b47a33
 +        ) : newapiProviders.length === 0 ? (
 +          <div className="text-sm text-muted-foreground py-10 text-center">
 +            {t("account.empty", {
-+              defaultValue: "还没有绑定任何账户，点下方「新增账户」绑定第一个",
++              defaultValue: "还没有绑定任何 key，点下方「新增 key」绑定第一个",
 +            })}
 +          </div>
 +        ) : (
@@ -411,7 +416,7 @@ index 00000000..01b47a33
 +      <div className="border-t border-border-default bg-muted/20 px-6 py-3 flex-shrink-0">
 +        <Button className="w-full" onClick={() => setAddOpen(true)}>
 +          <Plus className="w-4 h-4 mr-1.5" />
-+          {t("account.addAccount", { defaultValue: "新增账户" })}
++          {t("account.addAccount", { defaultValue: "新增 key" })}
 +        </Button>
 +      </div>
 +
@@ -488,6 +493,14 @@ index 00000000..01b47a33
 +    });
 +  };
 +
++  // [ccs] 快捷操作：全选 / 全不选 / 反选（仅在可见 app 范围内）。
++  const allSelected =
++    targetApps.length > 0 && targetApps.every((app) => selected.has(app));
++  const selectAll = () => setSelected(new Set(targetApps));
++  const selectNone = () => setSelected(new Set());
++  const invert = () =>
++    setSelected(new Set(targetApps.filter((app) => !selected.has(app))));
++
 +  return (
 +    <Dialog
 +      open={provider !== null}
@@ -517,6 +530,38 @@ index 00000000..01b47a33
 +          </DialogDescription>
 +        </DialogHeader>
 +        <div className="space-y-2 px-6 py-4">
++          {/* [ccs] 快捷操作条：全选 / 全不选 / 反选。 */}
++          <div className="flex items-center gap-2 pb-1">
++            <Button
++              type="button"
++              variant="ghost"
++              size="sm"
++              className="h-7 px-2 text-xs"
++              onClick={allSelected ? selectNone : selectAll}
++              disabled={applying || targetApps.length === 0}
++            >
++              {allSelected
++                ? t("account.selectNone", { defaultValue: "全不选" })
++                : t("account.selectAll", { defaultValue: "全选" })}
++            </Button>
++            <Button
++              type="button"
++              variant="ghost"
++              size="sm"
++              className="h-7 px-2 text-xs"
++              onClick={invert}
++              disabled={applying || targetApps.length === 0}
++            >
++              {t("account.selectInvert", { defaultValue: "反选" })}
++            </Button>
++            <span className="ml-auto text-xs text-muted-foreground">
++              {t("account.selectedCount", {
++                defaultValue: "已选 {{count}} / {{total}}",
++                count: selected.size,
++                total: targetApps.length,
++              })}
++            </span>
++          </div>
 +          {targetApps.map((app) => (
 +            <label
 +              key={app}
@@ -737,7 +782,7 @@ index 00000000..01b47a33
 +      >
 +        <DialogHeader>
 +          <DialogTitle>
-+            {t("account.addAccount", { defaultValue: "新增账户" })}
++            {t("account.addAccount", { defaultValue: "新增 key" })}
 +          </DialogTitle>
 +          <DialogDescription>
 +            {t("account.addSubtitle", {
@@ -799,10 +844,10 @@ index 00000000..01b47a33
 +}
 diff --git a/src/components/account/KeyCard.tsx b/src/components/account/KeyCard.tsx
 new file mode 100644
-index 00000000..7cc370e2
+index 00000000..55fd5cad
 --- /dev/null
 +++ b/src/components/account/KeyCard.tsx
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,225 @@
 +// [ccs] 账户面板里的单个 key 卡片。
 +//
 +// cc-switch 里「一个 Dokng key」= 一条 providerType:"newapi" 的 UniversalProvider。
@@ -884,6 +929,13 @@ index 00000000..7cc370e2
 +                <span className="font-medium truncate">{displayName}</span>
 +                {statusLabel && (
 +                  <Badge variant="destructive">{statusLabel}</Badge>
++                )}
++                {/* [ccs] key 所属分组（profile.keyGroup，来自 Dokng 侧定价分组）。空则不显示。 */}
++                {profile?.keyGroup && (
++                  <Badge variant="outline" className="flex-shrink-0">
++                    {t("account.keyGroup", { defaultValue: "分组" })}:{" "}
++                    {profile.keyGroup}
++                  </Badge>
 +                )}
 +                {profile?.keyDynamicRatio && (
 +                  <Badge variant="secondary">
@@ -1023,10 +1075,10 @@ index 00000000..7cc370e2
 +}
 diff --git a/src/components/account/importKey.ts b/src/components/account/importKey.ts
 new file mode 100644
-index 00000000..1354e253
+index 00000000..6497c156
 --- /dev/null
 +++ b/src/components/account/importKey.ts
-@@ -0,0 +1,334 @@
+@@ -0,0 +1,359 @@
 +// [ccs] Dokng 账户「铺开到各 CLI」逻辑。
 +//
 +// cc-switch 里「一个 Dokng key」= 一条 providerType:"newapi" 的 UniversalProvider。
@@ -1046,6 +1098,7 @@ index 00000000..1354e253
 +//   - additive 类（opencode/openclaw/hermes）：add(addToLive) 直接决定是否写 live。
 +
 +import { providersApi, universalProvidersApi } from "@/lib/api";
++import { accountApi } from "@/lib/api/account";
 +import {
 +  createUniversalProviderFromPreset,
 +  findPresetByType,
@@ -1295,13 +1348,21 @@ index 00000000..1354e253
 +        sortIndex: topIndex,
 +      });
 +
-+      // add：additive 类由 addToLive=activate 决定是否写 live；switch 类仅在无当前时自动激活。
-+      // save_provider 对已存在 id 覆盖，故重复铺开幂等。
-+      await providersApi.add(appProvider, app, options.activate);
++      // 分两步独立报错，便于定位失败环节（"加入列表" vs "激活"）：
++      //   step="add"    additive 类由 addToLive=activate 决定是否写 live；switch 类仅在无当前时自动激活。
++      //                 save_provider 对已存在 id 覆盖，故重复铺开幂等。
++      //   step="switch" switch 类显式激活时设为当前（会替换当前选择——仅对用户勾选的 app 生效）。
++      let step: "add" | "switch" = "add";
++      try {
++        await providersApi.add(appProvider, app, options.activate);
 +
-+      // switch 类应用：显式激活时设为当前（会替换当前选择——仅对用户勾选的 app 生效）。
-+      if (options.activate && !isAdditiveApp(app)) {
-+        await providersApi.switch(appProvider.id, app);
++        if (options.activate && !isAdditiveApp(app)) {
++          step = "switch";
++          await providersApi.switch(appProvider.id, app);
++        }
++      } catch (inner) {
++        const raw = inner instanceof Error ? inner.message : String(inner);
++        throw new Error(`[${step}] ${raw}`);
 +      }
 +
 +      results.push({ app, ok: true });
@@ -1339,12 +1400,28 @@ index 00000000..1354e253
 +    throw new Error("缺少 NewAPI 预设，无法绑定账户");
 +  }
 +
++  const trimmedBaseUrl = baseUrl.trim().replace(/\/+$/, "");
++  const trimmedApiKey = apiKey.trim();
++
++  // 渠道名优先用用户填写的；没填则拉一次 profile 用远端 token.Name（即该 key 在 Dokng 侧的名字），
++  // 保证卡片/铺开展示的是「Dokng · <这个 key 的真实名字>」而非预设名「NewAPI」。
++  let resolvedName = name?.trim();
++  if (!resolvedName) {
++    try {
++      const result = await accountApi.getProfile(trimmedBaseUrl, trimmedApiKey);
++      resolvedName = result.ok ? result.profile?.tokenName?.trim() : undefined;
++    } catch {
++      // 拉取失败（网络/无效 key）不阻断绑定：名字回落到预设名，用户之后可编辑。
++      resolvedName = undefined;
++    }
++  }
++
 +  const provider = createUniversalProviderFromPreset(
 +    preset,
 +    generateUUID(),
-+    baseUrl.trim().replace(/\/+$/, ""),
-+    apiKey.trim(),
-+    name?.trim() || undefined,
++    trimmedBaseUrl,
++    trimmedApiKey,
++    resolvedName || undefined,
 +  );
 +  // 覆盖为 Dokng 品牌：官网指向自建站点、图标用 Dokng logo。
 +  provider.websiteUrl = DOKNG_WEBSITE_URL;

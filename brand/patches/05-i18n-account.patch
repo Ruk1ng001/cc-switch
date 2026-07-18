@@ -11,19 +11,19 @@
 #   - src/i18n/locales/ja.json
 #
 diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
-index 4dd0b9a6..5f37f255 100644
+index 4dd0b9a6..a6810aa6 100644
 --- a/src/i18n/locales/en.json
 +++ b/src/i18n/locales/en.json
-@@ -1,4 +1,55 @@
+@@ -1,4 +1,60 @@
  {
 +  "account": {
 +    "title": "My Account",
 +    "subtitle": "Manage Dokng accounts and deploy to your CLIs in one click",
-+    "listTitle": "Bound accounts",
++    "listTitle": "Bound keys",
 +    "reloadList": "Refresh list",
 +    "console": "Console",
 +    "topup": "Top up",
-+    "addAccount": "Add account",
++    "addAccount": "Add key",
 +    "addSubtitle": "Paste your Dokng API Key to bind an account; it deploys to all CLIs automatically",
 +    "connected": "Connected",
 +    "keyTokensToday": "Tokens today",
@@ -32,7 +32,7 @@ index 4dd0b9a6..5f37f255 100644
 +    "openLinkError": "Failed to open link: {{error}}",
 +    "usageRingLabel": "Account quota used {{pct}}%",
 +    "used": "Used",
-+    "empty": "No accounts bound yet. Click \"Add account\" below to bind your first one.",
++    "empty": "No keys bound yet. Click \"Add key\" below to bind your first one.",
 +    "bindTitle": "Bind new account",
 +    "baseUrl": "Endpoint URL",
 +    "apiKey": "API Key",
@@ -65,25 +65,30 @@ index 4dd0b9a6..5f37f255 100644
 +    "deleteConfirmTitle": "Delete account",
 +    "deleteConfirm": "Delete account \"{{name}}\"? This cannot be undone.",
 +    "deleteSuccess": "Account deleted",
-+    "deleteError": "Delete failed: {{error}}"
++    "deleteError": "Delete failed: {{error}}",
++    "selectAll": "Select all",
++    "selectNone": "Select none",
++    "selectInvert": "Invert",
++    "selectedCount": "Selected {{count}} / {{total}}",
++    "keyGroup": "Group"
 +  },
    "app": {
      "title": "CC Switch",
      "description": "All-in-One Assistant for Claude Code, Codex & Gemini CLI"
 diff --git a/src/i18n/locales/ja.json b/src/i18n/locales/ja.json
-index 94dfe2c5..6f929aae 100644
+index 94dfe2c5..3a2db07d 100644
 --- a/src/i18n/locales/ja.json
 +++ b/src/i18n/locales/ja.json
-@@ -1,4 +1,55 @@
+@@ -1,4 +1,60 @@
  {
 +  "account": {
 +    "title": "マイアカウント",
 +    "subtitle": "Dokng アカウントを管理し、各アプリにワンクリックで展開",
-+    "listTitle": "バインド済みアカウント",
++    "listTitle": "バインド済み key",
 +    "reloadList": "リストを更新",
 +    "console": "コンソール",
 +    "topup": "チャージ",
-+    "addAccount": "アカウントを追加",
++    "addAccount": "key を追加",
 +    "addSubtitle": "Dokng API Key を貼り付けてアカウントをバインドすると、各 CLI に自動展開します",
 +    "connected": "接続済み",
 +    "keyTokensToday": "本日の Tokens",
@@ -92,7 +97,7 @@ index 94dfe2c5..6f929aae 100644
 +    "openLinkError": "リンクを開けませんでした：{{error}}",
 +    "usageRingLabel": "アカウント額度の使用率 {{pct}}%",
 +    "used": "使用済み",
-+    "empty": "まだアカウントがバインドされていません。下の「アカウントを追加」から最初のアカウントをバインドしてください。",
++    "empty": "まだ key がバインドされていません。下の「key を追加」から最初の key をバインドしてください。",
 +    "bindTitle": "新しいアカウントをバインド",
 +    "baseUrl": "エンドポイント URL",
 +    "apiKey": "API Key",
@@ -125,25 +130,30 @@ index 94dfe2c5..6f929aae 100644
 +    "deleteConfirmTitle": "アカウントを削除",
 +    "deleteConfirm": "アカウント「{{name}}」を削除しますか？この操作は取り消せません。",
 +    "deleteSuccess": "アカウントを削除しました",
-+    "deleteError": "削除失敗：{{error}}"
++    "deleteError": "削除失敗：{{error}}",
++    "selectAll": "すべて選択",
++    "selectNone": "選択解除",
++    "selectInvert": "選択反転",
++    "selectedCount": "選択済み {{count}} / {{total}}",
++    "keyGroup": "グループ"
 +  },
    "app": {
      "title": "CC Switch",
      "description": "Claude Code・Codex・Gemini CLI のためのオールインワンアシスタント"
 diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
-index 8cab77aa..bb4a708a 100644
+index 8cab77aa..6a25087f 100644
 --- a/src/i18n/locales/zh-TW.json
 +++ b/src/i18n/locales/zh-TW.json
-@@ -1,4 +1,55 @@
+@@ -1,4 +1,60 @@
  {
 +  "account": {
 +    "title": "我的帳戶",
 +    "subtitle": "管理 Dokng 帳戶，一鍵鋪開到各 CLI",
-+    "listTitle": "已綁定帳戶",
++    "listTitle": "已綁定 key",
 +    "reloadList": "重新整理列表",
 +    "console": "控制台",
 +    "topup": "儲值",
-+    "addAccount": "新增帳戶",
++    "addAccount": "新增 key",
 +    "addSubtitle": "貼上 Dokng API Key 綁定帳戶，綁定後自動鋪開到各 CLI",
 +    "connected": "已連接",
 +    "keyTokensToday": "今日 Tokens",
@@ -152,7 +162,7 @@ index 8cab77aa..bb4a708a 100644
 +    "openLinkError": "開啟連結失敗：{{error}}",
 +    "usageRingLabel": "帳戶額度已用 {{pct}}%",
 +    "used": "已用",
-+    "empty": "還沒有綁定任何帳戶，點下方「新增帳戶」綁定第一個",
++    "empty": "還沒有綁定任何 key，點下方「新增 key」綁定第一個",
 +    "bindTitle": "綁定新帳戶",
 +    "baseUrl": "介面位址",
 +    "apiKey": "API Key",
@@ -185,25 +195,30 @@ index 8cab77aa..bb4a708a 100644
 +    "deleteConfirmTitle": "刪除帳戶",
 +    "deleteConfirm": "確定刪除帳戶「{{name}}」？此操作無法復原。",
 +    "deleteSuccess": "已刪除帳戶",
-+    "deleteError": "刪除失敗：{{error}}"
++    "deleteError": "刪除失敗：{{error}}",
++    "selectAll": "全選",
++    "selectNone": "全不選",
++    "selectInvert": "反選",
++    "selectedCount": "已選 {{count}} / {{total}}",
++    "keyGroup": "分組"
 +  },
    "app": {
      "title": "CC Switch",
      "description": "Claude Code / Codex / Gemini CLI 全方位輔助工具"
 diff --git a/src/i18n/locales/zh.json b/src/i18n/locales/zh.json
-index b0f60dd3..dfb7da85 100644
+index b0f60dd3..3b6f3cf9 100644
 --- a/src/i18n/locales/zh.json
 +++ b/src/i18n/locales/zh.json
-@@ -1,4 +1,55 @@
+@@ -1,4 +1,60 @@
  {
 +  "account": {
 +    "title": "我的账户",
 +    "subtitle": "管理 Dokng 账户，一键铺开到各 CLI",
-+    "listTitle": "已绑定账户",
++    "listTitle": "已绑定 key",
 +    "reloadList": "刷新列表",
 +    "console": "控制台",
 +    "topup": "充值",
-+    "addAccount": "新增账户",
++    "addAccount": "新增 key",
 +    "addSubtitle": "粘贴 Dokng API Key 绑定账户，绑定后自动铺开到各 CLI",
 +    "connected": "已连接",
 +    "keyTokensToday": "今日 Tokens",
@@ -212,7 +227,7 @@ index b0f60dd3..dfb7da85 100644
 +    "openLinkError": "打开链接失败：{{error}}",
 +    "usageRingLabel": "账户额度已用 {{pct}}%",
 +    "used": "已用",
-+    "empty": "还没有绑定任何账户，点下方「新增账户」绑定第一个",
++    "empty": "还没有绑定任何 key，点下方「新增 key」绑定第一个",
 +    "bindTitle": "绑定新账户",
 +    "baseUrl": "接口地址",
 +    "apiKey": "API Key",
@@ -245,7 +260,12 @@ index b0f60dd3..dfb7da85 100644
 +    "deleteConfirmTitle": "删除账户",
 +    "deleteConfirm": "确定删除账户「{{name}}」？此操作不可撤销。",
 +    "deleteSuccess": "已删除账户",
-+    "deleteError": "删除失败：{{error}}"
++    "deleteError": "删除失败：{{error}}",
++    "selectAll": "全选",
++    "selectNone": "全不选",
++    "selectInvert": "反选",
++    "selectedCount": "已选 {{count}} / {{total}}",
++    "keyGroup": "分组"
 +  },
    "app": {
      "title": "CC Switch",
