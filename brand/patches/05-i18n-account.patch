@@ -11,7 +11,7 @@
 #   - src/i18n/locales/ja.json
 #
 diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
-index 4dd0b9a6..4874e616 100644
+index 10c3132a..2f3dc41b 100644
 --- a/src/i18n/locales/en.json
 +++ b/src/i18n/locales/en.json
 @@ -1,4 +1,63 @@
@@ -79,7 +79,7 @@ index 4dd0b9a6..4874e616 100644
      "title": "CC Switch",
      "description": "All-in-One Assistant for Claude Code, Codex & Gemini CLI"
 diff --git a/src/i18n/locales/ja.json b/src/i18n/locales/ja.json
-index 94dfe2c5..85da077f 100644
+index 579223a8..60ca8213 100644
 --- a/src/i18n/locales/ja.json
 +++ b/src/i18n/locales/ja.json
 @@ -1,4 +1,63 @@
@@ -147,7 +147,7 @@ index 94dfe2c5..85da077f 100644
      "title": "CC Switch",
      "description": "Claude Code・Codex・Gemini CLI のためのオールインワンアシスタント"
 diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
-index 8cab77aa..039b8871 100644
+index b61fc9ca..844adebe 100644
 --- a/src/i18n/locales/zh-TW.json
 +++ b/src/i18n/locales/zh-TW.json
 @@ -1,4 +1,63 @@
@@ -215,7 +215,7 @@ index 8cab77aa..039b8871 100644
      "title": "CC Switch",
      "description": "Claude Code / Codex / Gemini CLI 全方位輔助工具"
 diff --git a/src/i18n/locales/zh.json b/src/i18n/locales/zh.json
-index b0f60dd3..964a23b2 100644
+index ab2c1e9e..2f75bf1d 100644
 --- a/src/i18n/locales/zh.json
 +++ b/src/i18n/locales/zh.json
 @@ -1,4 +1,63 @@

@@ -60,7 +60,7 @@ index 00000000..0bc26174
 +    account::fetch_models(&base_url, &api_key).await
 +}
 diff --git a/src-tauri/src/commands/mod.rs b/src-tauri/src/commands/mod.rs
-index 29a26710..add630db 100644
+index 08e27091..d9b13aea 100644
 --- a/src-tauri/src/commands/mod.rs
 +++ b/src-tauri/src/commands/mod.rs
 @@ -1,5 +1,6 @@
@@ -70,7 +70,7 @@ index 29a26710..add630db 100644
  mod auth;
  mod balance;
  mod codex_oauth;
-@@ -35,6 +36,7 @@ mod usage;
+@@ -36,6 +37,7 @@ mod usage;
  mod webdav_sync;
  mod workspace;
  
@@ -79,11 +79,11 @@ index 29a26710..add630db 100644
  pub use balance::*;
  pub use codex_oauth::*;
 diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
-index b2b214c1..f56f82ca 100644
+index 0a9b811e..c73bc1dc 100644
 --- a/src-tauri/src/lib.rs
 +++ b/src-tauri/src/lib.rs
-@@ -1259,6 +1259,9 @@ pub fn run() {
-             commands::get_codex_oauth_models,
+@@ -1377,6 +1377,9 @@ pub fn run() {
+             commands::get_xai_oauth_models,
              commands::get_coding_plan_quota,
              commands::get_balance,
 +            // [ccs] new-api 账户接口

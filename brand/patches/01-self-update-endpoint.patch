@@ -32,7 +32,7 @@
 # 应用（在 upstream/ 内，基线为 brand/BASE_SHA）：
 #   git -C upstream apply brand/patches/01-self-update-endpoint.patch
 diff --git a/src-tauri/tauri.conf.json b/src-tauri/tauri.conf.json
-index 5f7a87a0..37e766a5 100644
+index 322008ac..64d09b5b 100644
 --- a/src-tauri/tauri.conf.json
 +++ b/src-tauri/tauri.conf.json
 @@ -60,9 +60,9 @@

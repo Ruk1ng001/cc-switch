@@ -18,7 +18,7 @@
 # 应用（在 upstream/ 内，基线为 brand/BASE_SHA）：
 #   git -C upstream apply brand/patches/06-tray-account-entry.patch
 diff --git a/src-tauri/src/tray.rs b/src-tauri/src/tray.rs
-index 95efbb87..40b4a0d2 100644
+index 741a5ebb..f10b711f 100644
 --- a/src-tauri/src/tray.rs
 +++ b/src-tauri/src/tray.rs
 @@ -50,6 +50,7 @@ static TRAY_SECTION_SUBMENUS: Lazy<
@@ -29,7 +29,7 @@ index 95efbb87..40b4a0d2 100644
      pub no_providers_label: &'static str,
      pub lightweight_mode: &'static str,
      pub quit: &'static str,
-@@ -64,6 +65,7 @@ impl TrayTexts {
+@@ -99,6 +100,7 @@ impl TrayTexts {
              "en" => Self {
                  show_main: "Open main window",
                  open_website: "Open Official Website",
@@ -37,7 +37,7 @@ index 95efbb87..40b4a0d2 100644
                  no_providers_label: "(no providers)",
                  lightweight_mode: "Lightweight Mode",
                  quit: "Quit",
-@@ -74,6 +76,7 @@ impl TrayTexts {
+@@ -109,6 +111,7 @@ impl TrayTexts {
              "ja" => Self {
                  show_main: "メインウィンドウを開く",
                  open_website: "公式サイトを開く",
@@ -45,7 +45,7 @@ index 95efbb87..40b4a0d2 100644
                  no_providers_label: "(プロバイダーなし)",
                  lightweight_mode: "軽量モード",
                  quit: "終了",
-@@ -84,6 +87,7 @@ impl TrayTexts {
+@@ -119,6 +122,7 @@ impl TrayTexts {
              "zh-TW" => Self {
                  show_main: "開啟主介面",
                  open_website: "開啟官方網站",
@@ -53,7 +53,7 @@ index 95efbb87..40b4a0d2 100644
                  no_providers_label: "(無供應商)",
                  lightweight_mode: "輕量模式",
                  quit: "退出",
-@@ -94,6 +98,7 @@ impl TrayTexts {
+@@ -129,6 +133,7 @@ impl TrayTexts {
              _ => Self {
                  show_main: "打开主界面",
                  open_website: "打开官方网站",
@@ -61,7 +61,7 @@ index 95efbb87..40b4a0d2 100644
                  no_providers_label: "(无供应商)",
                  lightweight_mode: "轻量模式",
                  quit: "退出",
-@@ -618,8 +623,13 @@ pub fn create_tray_menu(
+@@ -666,8 +671,13 @@ pub fn create_tray_menu(
          None::<&str>,
      )
      .map_err(|e| AppError::Message(format!("创建打开官方网站菜单失败: {e}")))?;
@@ -75,7 +75,7 @@ index 95efbb87..40b4a0d2 100644
          .item(&open_website_item)
          .separator();
  
-@@ -918,6 +928,34 @@ pub fn handle_tray_menu_event(app: &tauri::AppHandle, event_id: &str) {
+@@ -966,6 +976,34 @@ pub fn handle_tray_menu_event(app: &tauri::AppHandle, event_id: &str) {
                  }
              }
          }
@@ -111,7 +111,7 @@ index 95efbb87..40b4a0d2 100644
              if let Err(e) = app.opener().open_url("https://ccswitch.io", None::<String>) {
                  log::error!("打开官方网站失败: {e}");
 diff --git a/src/App.tsx b/src/App.tsx
-index feae4056..c1c14b68 100644
+index b89bb483..3be22bff 100644
 --- a/src/App.tsx
 +++ b/src/App.tsx
 @@ -452,6 +452,27 @@ function App() {
