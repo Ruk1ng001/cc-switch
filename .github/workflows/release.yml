@@ -84,7 +84,7 @@ jobs:
           else
             # 手动触发未填 tag：自动算下一个 vX.Y.Z-ccs.N，建 tag 并推送。
             git fetch --tags --quiet origin || true
-            version="$(scripts/next-version.sh | sed -n 's/^tag=//p')"
+            version="$(scripts/next-version.sh)"
             [ -n "$version" ] || { echo "❌ next-version.sh 未算出版本号" >&2; exit 1; }
             echo "自动计算下一个版本：$version"
             git config user.name "github-actions[bot]"
@@ -137,6 +137,9 @@ jobs:
           git -C upstream checkout --quiet "$BASE_TAG"
           git -C upstream reset --hard --quiet
           git -C upstream clean -fdq
+          # 改动 submodule 前先做纯格式预检：corrupt patch / CRLF 必须零副作用提前失败，
+          # 避免落地前序补丁后才在后序 patch 上失败。
+          scripts/apply-patches.sh --preflight
           echo "按 NN 序重放补丁："
           scripts/apply-patches.sh
           echo "全部补丁 apply 成功。"

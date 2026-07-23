@@ -113,13 +113,40 @@ jobs:
           git -C upstream reset --hard --quiet
           git -C upstream clean -fdq
 
+          # 在改动 submodule 前先做纯格式/语法预检；corrupt patch 必须零副作用提前失败。
+          scripts/apply-patches.sh --preflight
+
           # 用统一的重放脚本（strict apply）落地补丁——与出包流程同一来源，避免逻辑漂移。
           # 此刻 brand/BASE_SHA 还是旧基线（升级成功后才刷新），脚本会 warn HEAD≠BASE_SHA，
           # 但不致命：apply 模式只要求 upstream/ 工作区干净 + 补丁精确适用；任一补丁失败即非 0
           # → 步骤失败 → 通知维护者手动介入。
           echo "按 NN 序重放补丁到 $LATEST："
-          scripts/apply-patches.sh
-          echo "全部补丁 apply 成功。"
+          if scripts/apply-patches.sh; then
+            echo "全部补丁 apply 成功。"
+          else
+            # strict 失败：上游 $LATEST 很可能改到了补丁热点文件。直接在当前 $LATEST 工作区
+            # 逐补丁 3way 试应用，把冲突 hunk 落成 .rej 打印出来——诊断基于正确的新基线
+            # （此刻 BASE_SHA 还是旧的，--check-3way 会基于旧基线不准），让维护者一眼看到
+            # 哪个补丁的哪些 hunk 撞上了上游改动，缩短 rebase 定位时间。
+            echo "::group::strict apply 失败——3way 漂移诊断（基于新基线 ${LATEST}）" >&2
+            git -C upstream reset --hard --quiet
+            git -C upstream clean -fdq
+            for p in brand/patches/*.patch; do
+              [ -e "$p" ] || continue
+              name="$(basename "$p")"
+              if git -C upstream apply --3way "$PWD/$p" >/dev/null 2>&1; then
+                echo "  3way OK   $name" >&2
+              else
+                echo "  3way 冲突 ${name}：" >&2
+                git -C upstream apply --3way --reject "$PWD/$p" 2>&1 | sed 's/^/      /' >&2 || true
+                find upstream -name '*.rej' -print 2>/dev/null | sed 's/^/      rej: /' >&2 || true
+              fi
+            done
+            git -C upstream reset --hard --quiet; git -C upstream clean -fdq
+            echo "::endgroup::" >&2
+            echo "补丁 strict apply 失败，需人工把补丁 rebase 到 ${LATEST}（见上方 3way 诊断）。" >&2
+            exit 1
+          fi
 
       - name: 安装依赖 + typecheck（前端自洽校验）
         if: steps.detect.outputs.need == 'true'
@@ -164,7 +191,21 @@ jobs:
           git commit -m "chore(cc-switch): 自动升级基线到 ${LATEST}（每日自动）"
 
           # 推 main（保存基线推进）。
-          git push origin HEAD:main
+          # 加 pull --rebase + 重试：定时任务与手动触发 / 维护者推送可能并发，
+          # 裸 push 遇 non-fast-forward 会被拒。重试 3 次，每次先 rebase 再推；
+          # 基线文件冲突极少（只有并发升级才可能），冲突时放弃自动 rebase，让 job 失败
+          # 等人工介入（不强推、不覆盖他人提交）。
+          pushed=false
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              pushed=true
+              break
+            fi
+            echo "push main 第 $attempt 次失败（可能 non-fast-forward），rebase 后重试…" >&2
+            git fetch origin main --quiet || true
+            git rebase origin/main || { git rebase --abort || true; break; }
+          done
+          [ "$pushed" = true ] || { echo "push main 连续 3 次失败，放弃（无污染，可重跑）。" >&2; exit 1; }
           echo "已推送 main。"
 
           # 计算下一个 ccs 版本 tag（vX.Y.Z-ccs.N，基于新基线 BASE_TAG），打 tag 并推送。

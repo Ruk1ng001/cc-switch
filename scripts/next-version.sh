@@ -11,15 +11,21 @@
 #   2. 本地 `git tag -l`（无网络也能算，便于本机自测）。
 #
 # 用法：
-#   scripts/next-version.sh                       # 自动读 BASE_TAG + 本地 tag
+#   scripts/next-version.sh                       # 自动读 BASE_TAG + 本地 tag；stdout 打 tag 值
 #   scripts/next-version.sh --base v3.17.0        # 覆盖基线版本
+#   scripts/next-version.sh --field version       # stdout 改打 version 字段（默认 tag）
 #   EXISTING_TAGS="v3.17.0-ccs.1 v3.17.0-ccs.2" scripts/next-version.sh --base v3.17.0
 #
-# 输出（若设置 GITHUB_OUTPUT 则写入其中，同时也打到 stdout 便于本机查看）：
-#   base=v3.17.0
-#   n=1
-#   version=v3.17.0-ccs.1
-#   tag=v3.17.0-ccs.1
+# 输出：
+#   - stdout：只打「一个字段的纯值」一行（默认 tag，即最终版本 tag）。这样
+#     `NEWTAG="$(next-version.sh)"` 天然拿到干净的 tag，无需调用方再 sed/awk 抽取。
+#     用 --field <base|n|version|tag> 选别的字段。
+#   - ${GITHUB_OUTPUT}（若设置）：照旧写全部 KEY=VALUE 四行（base=/n=/version=/tag=），
+#     供 GitHub Actions 用 steps.<id>.outputs.<key> 消费。
+#
+# 历史坑（勿回退）：早期 stdout 也打四行 KEY=VALUE，auto-upgrade 里 `$(next-version.sh)`
+#   会把四行整个吞进变量，git tag 报 "not a valid tag name"。现在 stdout 与 GITHUB_OUTPUT
+#   职责分离：stdout=纯值给命令替换，GITHUB_OUTPUT=KEY=VALUE 给 Actions。
 #
 # 退出码：0 成功；非 0 参数/基线缺失。
 set -euo pipefail
@@ -31,14 +37,22 @@ BASE_TAG_FILE="$PROJECT_ROOT/brand/BASE_TAG"
 usage() { sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 base=""
+field="tag"   # stdout 打哪个字段的纯值（默认 tag）；GITHUB_OUTPUT 始终写全部四行。
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --base) base="${2:-}"; shift 2 ;;
     --base=*) base="${1#--base=}"; shift ;;
+    --field) field="${2:-}"; shift 2 ;;
+    --field=*) field="${1#--field=}"; shift ;;
     *) printf '未知参数：%s\n' "$1" >&2; exit 2 ;;
   esac
 done
+# 校验 --field 取值（只认四个已知字段，挡掉打错字导致 stdout 空输出）。
+case "$field" in
+  base|n|version|tag) : ;;
+  *) printf '未知字段：%s（可选 base|n|version|tag）\n' "$field" >&2; exit 2 ;;
+esac
 
 # 基线版本：优先 --base，其次 brand/BASE_TAG。
 if [ -z "$base" ]; then
@@ -77,8 +91,9 @@ fi
 next_n=$((max_n + 1))
 version="${base}-ccs.${next_n}"
 
+# emit：只往 $GITHUB_OUTPUT 写 KEY=VALUE（供 Actions 的 steps.<id>.outputs.<key> 消费）。
+# stdout 不在这里打——stdout 只在最后打「选中字段的纯值」一行，职责分离（见文件头历史坑）。
 emit() {
-  printf '%s\n' "$1"
   [ -n "${GITHUB_OUTPUT:-}" ] && printf '%s\n' "$1" >> "$GITHUB_OUTPUT"
   return 0
 }
@@ -87,3 +102,11 @@ emit "base=${base}"
 emit "n=${next_n}"
 emit "version=${version}"
 emit "tag=${version}"
+
+# stdout：只打选中字段的纯值一行，供 `$(next-version.sh)` 命令替换直接取用。
+case "$field" in
+  base)    printf '%s\n' "$base" ;;
+  n)       printf '%s\n' "$next_n" ;;
+  version) printf '%s\n' "$version" ;;
+  tag)     printf '%s\n' "$version" ;;
+esac
