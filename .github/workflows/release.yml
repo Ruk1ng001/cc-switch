@@ -400,13 +400,19 @@ jobs:
           VERSION="$APP_VERSION"
           PUB_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           base_url="https://dl.dokng.com/cc-switch"
+          # [dokng] 安装包在 R2 上下沉到 cc-switch/<version>/ 子目录（与 open-code 同构）。
+          # 子目录名 = 去 v 前缀的 tag（品牌发布号，形如 3.17.0-ccs.4）——与 R2 清理逻辑抽取的
+          # -ccs.N token 一致，故清理正则无需改动。注意这不同于安装包文件名内嵌的 APP_VERSION
+          # （纯数字 3.17.0-4，因 msi 第 4 段不接受字母），两者独立、互不影响。
+          # latest.json 里 url 是绝对地址，Tauri updater 直接按此地址下载，故此处补上子目录段。
+          REL_VERSION="${TAG#v}"
           mac_url=""; mac_sig=""
           win_url=""; win_sig=""
           linux_url=""; linux_sig=""
           shopt -s nullglob
           for sig in release-assets/*.sig; do
             fname=$(basename "${sig%.sig}")
-            url="$base_url/$fname"
+            url="$base_url/$REL_VERSION/$fname"
             sig_content=$(cat "$sig")
             case "$fname" in
               *.tar.gz)             mac_url="$url"; mac_sig="$sig_content";;
@@ -480,20 +486,30 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
+          TAG: ${{ needs.resolve.outputs.version }}
         run: |
           set -euo pipefail
           for v in "$R2_ACCOUNT_ID" "$R2_ACCESS_KEY_ID" "$R2_SECRET_ACCESS_KEY" "$R2_BUCKET"; do
             [ -n "$v" ] && echo "::add-mask::$v" || true
           done
           endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          echo "待上传到 R2 cc-switch/ 的文件："; ls -la release-assets
+          # 版本子目录名 = 去 v 前缀的 tag（品牌发布号，形如 3.17.0-ccs.4），与组装 latest.json 时
+          # url 里的前缀（REL_VERSION）一致；也与 R2 清理抽取的 -ccs.N token 一致。
+          REL_VERSION="${TAG#v}"
+
+          # [dokng] R2 布局（与 open-code 同构）：
+          #   cc-switch/                       ← 产品根，updater 固定 URL 轮询
+          #     ├── latest.json                ← 更新元数据，每版覆盖 → 禁缓存
+          #     └── <version>/                 ← 产物 + .sig，URL 每版唯一 → immutable 长缓存
+          #         └── *.dmg / *.msi / *.AppImage / *.tar.gz / *.sig 等
+          # 两类内容分开上传，套不同 cache-control。
+          echo "待上传到 R2 cc-switch/${REL_VERSION}/ 的产物（latest.json 单独传根）："; ls -la release-assets
           # --checksum-algorithm CRC32：规避 R2 对 S3 默认分块校验的兼容问题。
           #
-          # 缓存分级（关键）：安装包/.sig 文件名带版本号（URL 每版唯一）→ 长缓存 immutable，
-          # CDN 尽量命中；latest.json 是固定 URL、每版都要覆盖 → 必须禁缓存，否则 Cloudflare
-          # CDN 会把旧 latest.json 缓存住，客户端拉不到新版本、自更新延迟数小时。
-          # 先整目录长缓存（含 latest.json，随后被覆盖），再单独覆盖 latest.json 为禁缓存。
-          aws s3 cp release-assets/ "s3://${R2_BUCKET}/cc-switch/" \
+          # 缓存分级（关键）：产物/.sig 文件名带版本号且进版本子目录（URL 每版唯一）→ 长缓存
+          # immutable，CDN 尽量命中；latest.json 是固定 URL、每版都要覆盖 → 必须禁缓存，否则
+          # Cloudflare CDN 会把旧 latest.json 缓存住，客户端拉不到新版本、自更新延迟数小时。
+          aws s3 cp release-assets/ "s3://${R2_BUCKET}/cc-switch/${REL_VERSION}/" \
             --recursive \
             --exclude "latest.json" \
             --endpoint-url "$endpoint" \
@@ -506,10 +522,13 @@ jobs:
             --cache-control "no-cache,max-age=0,must-revalidate"
           echo "R2 双写完成：s3://${R2_BUCKET}/cc-switch/（latest.json 禁缓存，产物 immutable）"
 
-          # 保留最近 3 个版本：产物文件名含版本 token（vX.Y.Z-ccs.N）；latest.json 无版本号永远保留。
+          # 保留最近 3 个版本：产物现按 cc-switch/<version>/ 分目录存放，key 形如
+          # cc-switch/3.17.0-ccs.N/xxx。列出 cc-switch/ 下全部对象（--recursive）→ 抽版本 token →
+          # sort -V 取最新 3 个为保留集 → 逐 key 精确比对（grep -qxF 整行匹配，避免 ccs.2
+          # 误伤 ccs.20），版本不在保留集的对象删除；无版本 token 的对象（根下 latest.json）永远保留。
           KEEP_VERSIONS=3
           mapfile -t all_keys < <(
-            aws s3 ls "s3://${R2_BUCKET}/cc-switch/" --endpoint-url "$endpoint" \
+            aws s3 ls "s3://${R2_BUCKET}/cc-switch/" --recursive --endpoint-url "$endpoint" \
               | awk '{print $4}' | grep -v '^$' || true
           )
           if [ "${#all_keys[@]}" -gt 0 ]; then
@@ -522,10 +541,11 @@ jobs:
             if [ "${total:-0}" -gt "$KEEP_VERSIONS" ]; then
               for key in "${all_keys[@]}"; do
                 v="$(printf '%s' "$key" | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+-ccs\.[0-9]+' | head -1 || true)"
+                # 无版本 token（根下 latest.json 等）→ 永远保留。
                 [ -n "$v" ] || continue
                 if ! printf '%s\n' "$keep" | grep -qxF "$v"; then
                   echo "  清理旧版本对象：$key"
-                  aws s3 rm "s3://${R2_BUCKET}/cc-switch/${key}" --endpoint-url "$endpoint" || true
+                  aws s3 rm "s3://${R2_BUCKET}/${key}" --endpoint-url "$endpoint" || true
                 fi
               done
             else
